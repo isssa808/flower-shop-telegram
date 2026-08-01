@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Flowers Batum Flower — Админка</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="/shared/tokens.css" />
+  <link rel="stylesheet" href="/admin/style.css" />
+</head>
+<body>
+  <div class="app" id="app">
+    <header class="topbar">
+      <div class="eyebrow" id="staff-label">Панель персонала</div>
+      <h1>Flowers Batum Flower</h1>
+    </header>
+
+    <div id="access-denied" class="empty-state" style="display:none;">
+      <div class="icon">🔒</div>
+      Доступ только для сотрудников магазина.<br />Откройте приложение через бот-меню для персонала.
+    </div>
+
+    <main id="admin-main" style="display:none;">
+      <section id="view-orders" class="admin-view">
+        <div class="tabs" id="order-status-tabs"></div>
+        <div id="orders-list"></div>
+      </section>
+
+      <section id="view-catalog" class="admin-view" style="display:none;">
+        <div class="admin-section-head">
+          <h2>Каталог</h2>
+          <button class="btn btn-primary btn-sm" id="add-product-btn">+ Товар</button>
+        </div>
+        <div id="catalog-list"></div>
+      </section>
+
+      <section id="view-stock" class="admin-view" style="display:none;">
+        <div class="admin-section-head">
+          <h2>Склад</h2>
+          <button class="btn btn-primary btn-sm" id="add-stock-btn">+ Позиция</button>
+        </div>
+        <div id="stock-list"></div>
+      </section>
+    </main>
+  </div>
+
+  <nav class="bottom-nav" id="bottom-nav" style="display:none;">
+    <button class="nav-btn active" data-view="orders"><span class="nav-icon">📦</span><span>Заказы</span></button>
+    <button class="nav-btn" data-view="catalog"><span class="nav-icon">🌷</span><span>Каталог</span></button>
+    <button class="nav-btn" data-view="stock"><span class="nav-icon">📋</span><span>Склад</span></button>
+  </nav>
+
+  <div class="sheet-backdrop" id="product-edit-backdrop" data-close="product-edit"></div>
+  <div class="sheet" id="product-edit-sheet">
+    <div class="sheet-handle"></div>
+    <div id="product-edit-content"></div>
+  </div>
+
+  <div class="sheet-backdrop" id="stock-action-backdrop" data-close="stock-action"></div>
+  <div class="sheet" id="stock-action-sheet">
+    <div class="sheet-handle"></div>
+    <div id="stock-action-content"></div>
+  </div>
+
+  <div class="sheet-backdrop" id="order-detail-backdrop" data-close="order-detail"></div>
+  <div class="sheet" id="order-detail-sheet">
+    <div class="sheet-handle"></div>
+    <div id="order-detail-content"></div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script type="module" src="/admin/app.js"></script>
+</body>
+</html>

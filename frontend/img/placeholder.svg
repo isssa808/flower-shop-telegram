@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400">
+  <rect width="400" height="400" fill="#F2E9D8"/>
+  <circle cx="200" cy="170" r="55" fill="#D6335C" opacity="0.85"/>
+  <circle cx="150" cy="220" r="55" fill="#4C7A5A" opacity="0.85"/>
+  <circle cx="250" cy="220" r="55" fill="#0F3B36" opacity="0.85"/>
+  <text x="200" y="330" font-family="sans-serif" font-size="18" fill="#1C2B27" text-anchor="middle">фото букета</text>
+</svg>

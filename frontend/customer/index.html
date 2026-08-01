@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Flowers Batum Flower</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="/shared/tokens.css" />
+  <link rel="stylesheet" href="/customer/style.css" />
+</head>
+<body>
+  <div class="app" id="app">
+    <header class="topbar">
+      <div class="eyebrow">Flowers Batum Flower · Батуми</div>
+      <h1>Свежие букеты<br />с доставкой сегодня</h1>
+    </header>
+
+    <nav class="tabs" id="tabs"><!-- категории рендерятся из JS --></nav>
+
+    <div class="search-wrap">
+      <input type="search" id="search-input" placeholder="Искать букет, повод, цветок…" />
+    </div>
+
+    <main class="product-grid" id="product-grid">
+      <div class="empty-state">Загружаем каталог…</div>
+    </main>
+  </div>
+
+  <div class="cart-bar" id="cart-bar">
+    <span id="cart-summary">Корзина пуста</span>
+    <span class="cart-arrow">Оформить →</span>
+  </div>
+
+  <!-- Карточка товара -->
+  <div class="sheet-backdrop" id="product-backdrop" data-close="product"></div>
+  <div class="sheet" id="product-sheet">
+    <div class="sheet-handle"></div>
+    <div id="product-sheet-content"></div>
+  </div>
+
+  <!-- Корзина -->
+  <div class="sheet-backdrop" id="cart-backdrop" data-close="cart"></div>
+  <div class="sheet" id="cart-sheet">
+    <div class="sheet-handle"></div>
+    <h2>Корзина</h2>
+    <div id="cart-items"></div>
+    <div class="cart-total" id="cart-total"></div>
+    <button class="btn btn-primary btn-block" id="to-checkout-btn" style="margin-top:14px;">Оформить заказ</button>
+  </div>
+
+  <!-- Оформление заказа -->
+  <div class="sheet-backdrop" id="checkout-backdrop" data-close="checkout"></div>
+  <div class="sheet" id="checkout-sheet">
+    <div class="sheet-handle"></div>
+    <h2>Оформление заказа</h2>
+    <form id="checkout-form">
+      <div class="segmented" id="fulfillment-toggle">
+        <button type="button" class="segmented-btn active" data-value="delivery">Доставка</button>
+        <button type="button" class="segmented-btn" data-value="pickup">Самовывоз</button>
+      </div>
+
+      <div id="delivery-fields">
+        <div class="field">
+          <label for="f-address">Адрес доставки</label>
+          <input id="f-address" name="address" placeholder="Улица, дом, квартира" required />
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label for="f-date">Дата</label>
+            <input id="f-date" name="delivery_date" type="date" required />
+          </div>
+          <div class="field">
+            <label for="f-slot">Время</label>
+            <select id="f-slot" name="delivery_slot">
+              <option value="">Как можно скорее</option>
+              <option value="10:00-12:00">10:00–12:00</option>
+              <option value="12:00-14:00">12:00–14:00</option>
+              <option value="14:00-16:00">14:00–16:00</option>
+              <option value="16:00-18:00">16:00–18:00</option>
+              <option value="18:00-20:00">18:00–20:00</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="f-name">Ваше имя</label>
+        <input id="f-name" name="customer_name" required />
+      </div>
+      <div class="field">
+        <label for="f-phone">Ваш телефон</label>
+        <input id="f-phone" name="customer_phone" type="tel" placeholder="+995 5xx xx xx xx" required />
+      </div>
+
+      <div class="field">
+        <label for="f-recipient">Получатель (если это подарок)</label>
+        <input id="f-recipient" name="recipient_name" placeholder="Оставьте пустым, если получаете сами" />
+      </div>
+      <div class="field">
+        <label for="f-card">Текст открытки</label>
+        <textarea id="f-card" name="card_message" rows="2" placeholder="Например: «С днём рождения!»"></textarea>
+      </div>
+
+      <label class="checkbox-row">
+        <input type="checkbox" id="f-photo" name="photo_before_delivery" />
+        Прислать фото букета перед доставкой
+      </label>
+
+      <div class="field">
+        <label>Способ оплаты</label>
+        <div class="segmented" id="payment-toggle">
+          <button type="button" class="segmented-btn active" data-value="cash">Наличные</button>
+          <button type="button" class="segmented-btn" data-value="card_courier">Карта курьеру</button>
+          <button type="button" class="segmented-btn" data-value="transfer">Перевод</button>
+        </div>
+      </div>
+
+      <div class="checkout-total" id="checkout-total"></div>
+      <button type="submit" class="btn btn-primary btn-block" id="submit-order-btn">Подтвердить заказ</button>
+    </form>
+  </div>
+
+  <!-- Подтверждение заказа -->
+  <div class="sheet-backdrop" id="confirm-backdrop"></div>
+  <div class="sheet" id="confirm-sheet">
+    <div class="sheet-handle"></div>
+    <div id="confirm-content"></div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script type="module" src="/customer/app.js"></script>
+</body>
+</html>
