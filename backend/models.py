@@ -119,9 +119,14 @@ CREATE TABLE IF NOT EXISTS order_items (
 
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    # timeout=5 — сколько ждать снятия блокировки вместо мгновенной ошибки
+    # "database is locked" при параллельной записи.
+    conn = sqlite3.connect(DB_PATH, timeout=5)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # WAL даёт одновременные чтения во время записи и меньше конфликтов блокировок.
+    # Режим сохраняется на уровне файла БД, но выставлять при каждом коннекте безвредно.
+    conn.execute("PRAGMA journal_mode = WAL")
     return conn
 
 

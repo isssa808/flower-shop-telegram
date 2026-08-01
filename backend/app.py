@@ -28,15 +28,29 @@ import urllib.request
 import urllib.error
 from flask import Flask, request, jsonify, send_from_directory, g
 
-from models import get_db, init_db
+from models import get_db, init_db, DB_PATH
 from auth import validate_init_data
 
 BASE_DIR = os.path.dirname(__file__)
 FRONTEND_DIR = os.path.join(BASE_DIR, "..", "frontend")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "LOCAL_DEV_TOKEN")
 
+# Загруженные фото храним рядом с БД (на постоянном Volume), иначе они
+# исчезали бы при каждом редеплое. Каталог создаётся при старте.
+UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "").strip() or os.path.join(os.path.dirname(DB_PATH), "uploads")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+ALLOWED_PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 МБ на файл/запрос
+
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
 init_db(reset=False)
+
+
+@app.errorhandler(413)
+def _too_large(_e):
+    return jsonify({"error": "file too large", "detail": "макс. 5 МБ"}), 413
 
 
 # --------------------------------------------------------------------------
@@ -140,7 +154,9 @@ def notify_telegram(chat_id, text):
         app.logger.warning(f"[notify failed] {e}")
 
 
-STAFF_CHAT_ID = os.environ.get("STAFF_CHAT_ID")  # чат/канал персонала для новых заказов
+# Чат/канал персонала для новых заказов. Если не задан — шлём владельцу в личку
+# (он уже писал боту, так что chat_id = его telegram_id работает).
+STAFF_CHAT_ID = os.environ.get("STAFF_CHAT_ID") or os.environ.get("OWNER_TELEGRAM_ID")
 
 
 # --------------------------------------------------------------------------
@@ -325,6 +341,12 @@ def img_static(path):
     return send_from_directory(os.path.join(FRONTEND_DIR, "img"), path)
 
 
+@app.route("/static/uploads/<path:path>")
+def uploads_static(path):
+    # Загруженные фото товаров лежат на постоянном Volume (UPLOAD_DIR).
+    return send_from_directory(UPLOAD_DIR, path)
+
+
 @app.route("/shared/<path:path>")
 def shared_static(path):
     return send_from_directory(os.path.join(FRONTEND_DIR, "shared"), path)
@@ -392,7 +414,9 @@ def api_products():
 @app.route("/api/products/<int:product_id>")
 def api_product_detail(product_id):
     conn = get_db()
-    row = conn.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
+    row = conn.execute(
+        "SELECT * FROM products WHERE id = ? AND status != 'hidden'", (product_id,)
+    ).fetchone()
     if not row:
         conn.close()
         return jsonify({"error": "not found"}), 404
@@ -605,12 +629,15 @@ def api_admin_product_photo(product_id):
     if "photo" not in request.files:
         return jsonify({"error": "no file"}), 400
     f = request.files["photo"]
-    ext = os.path.splitext(f.filename)[1] or ".jpg"
+    ext = os.path.splitext(f.filename or "")[1].lower()
+    if ext not in ALLOWED_PHOTO_EXTS:
+        return jsonify({"error": "unsupported file type", "detail": "только изображ: jpg, png, webp, gif"}), 400
+    # Имя строим сами из product_id (int из маршрута) + проверенного расширения —
+    # имя файла от пользователя не используется, обхода путей нет.
     filename = f"product_{product_id}{ext}"
-    save_dir = os.path.join(FRONTEND_DIR, "img", "uploads")
-    os.makedirs(save_dir, exist_ok=True)
-    f.save(os.path.join(save_dir, filename))
-    url = f"/static/img/uploads/{filename}"
+    f.save(os.path.join(UPLOAD_DIR, filename))
+    # ?v=<время> — чтобы Telegram/браузер не показывал старую картинку из кэша
+    url = f"/static/uploads/{filename}?v={int(time.time())}"
     conn = get_db()
     conn.execute("UPDATE products SET photo_url=? WHERE id=?", (url, product_id))
     conn.commit()
