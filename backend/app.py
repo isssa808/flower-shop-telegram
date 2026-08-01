@@ -21,6 +21,8 @@ Backend Flower Batum Flower Mini App.
 """
 import os
 import json
+import time
+import threading
 import functools
 import urllib.request
 import urllib.error
@@ -70,8 +72,51 @@ def bootstrap():
             "INSERT INTO staff (telegram_id, name, role) VALUES (?, ?, 'owner')",
             (owner_id, os.environ.get("OWNER_NAME", "Владелец")),
         )
+    # Демо-товары: чтобы каталог не был пустым сразу после первого запуска.
+    # Заводятся только если товаров ещё нет и SEED_DEMO != "0". Когда заведёте
+    # свой ассортимент через админку — поставьте переменную SEED_DEMO=0.
+    if os.environ.get("SEED_DEMO", "1") != "0" and \
+       not conn.execute("SELECT 1 FROM products LIMIT 1").fetchone():
+        seed_demo_catalog(conn)
     conn.commit()
     conn.close()
+
+
+PLACEHOLDER_PHOTO = "/static/img/placeholder.svg"
+
+
+def seed_demo_catalog(conn):
+    """Небольшой демо-ассортимент под точку id=1. Товары можно править и
+    удалять в админке; повторно они не появятся, пока в каталоге есть хоть один
+    товар (или если задать SEED_DEMO=0)."""
+    # id категорий совпадают с порядком вставки в bootstrap (bouquets=1 … wholesale=6)
+    conn.executemany(
+        "INSERT INTO products (id, location_id, category_id, name, description, composition, "
+        "photo_url, status, occasion_tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            (1, 1, 1, "Букет «Батуми»", "Розы Netherlands, эвкалипт, авторская сборка",
+             "11 роз, эвкалипт", PLACEHOLDER_PHOTO, "in_stock", "романтика,день рождения"),
+            (2, 1, 1, "Букет «Бульвар»", "Тюльпаны микс с гипсофилой",
+             "15 тюльпанов, гипсофила", PLACEHOLDER_PHOTO, "in_stock", "весна,просто так"),
+            (3, 1, 2, "Свадебный букет невесты", "Под цвет и стиль мероприятия, обсуждается индивидуально",
+             "розы, эвкалипт, лента", PLACEHOLDER_PHOTO, "made_to_order", "свадьба"),
+            (4, 1, 3, "Шар фольгированный «Сердце»", "Гелиевый шар, 45 см",
+             "1 шар", PLACEHOLDER_PHOTO, "in_stock", "день рождения,романтика"),
+            (5, 1, 4, "Клубника в шоколаде, набор 9 шт", "Свежая клубника в бельгийском шоколаде",
+             "9 ягод", PLACEHOLDER_PHOTO, "in_stock", "романтика,подарок"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO product_variants (product_id, label, price) VALUES (?, ?, ?)",
+        [
+            (1, "S — 11 роз", 95), (1, "M — 25 роз", 190),
+            (2, "Стандарт — 15 тюльпанов", 65),
+            (3, "По согласованию", 0),
+            (4, "1 шт", 25),
+            (5, "Набор 9 шт", 70),
+        ],
+    )
+    print("[seed] демо-каталог создан (5 товаров)", flush=True)
 
 
 bootstrap()
@@ -133,10 +178,10 @@ def setup_bot_menu():
     Благодаря этому магазин открывается на телефоне прямо из чата с ботом —
     отдельный вечно-живой процесс bot.py для этого не нужен."""
     if BOT_TOKEN == "LOCAL_DEV_TOKEN":
-        app.logger.info("[bot setup skip] BOT_TOKEN не задан")
+        print("[bot setup skip] BOT_TOKEN не задан", flush=True)
         return
     if not APP_URL:
-        app.logger.warning("[bot setup skip] APP_URL/RAILWAY_PUBLIC_DOMAIN не заданы")
+        print("[bot setup skip] APP_URL/RAILWAY_PUBLIC_DOMAIN не заданы", flush=True)
         return
     ok_btn = _tg_call("setChatMenuButton", {
         "menu_button": {
@@ -145,16 +190,78 @@ def setup_bot_menu():
             "web_app": {"url": APP_URL},
         }
     })
-    _tg_call("setMyCommands", {
+    ok_cmd = _tg_call("setMyCommands", {
         "commands": [
             {"command": "start", "description": "Открыть магазин"},
             {"command": "admin", "description": "Панель персонала"},
         ]
     })
-    app.logger.info(f"[bot setup] menu button -> {APP_URL} (ok={ok_btn})")
+    print(f"[bot setup] menu button -> {APP_URL} (button ok={ok_btn}, commands ok={ok_cmd})", flush=True)
+
+
+# --------------------------------------------------------------------------
+# Мини-бот на long polling прямо внутри веб-процесса (фоновый поток). Нужен
+# только чтобы по /start дать кнопку магазина, а по /admin — кнопку админки:
+# именно так Telegram открывает нужный адрес со свежим initData. Отдельный
+# процесс/сервис для этого не требуется. Отключается переменной RUN_BOT=0.
+# ВАЖНО: держите gunicorn на одном воркере (--workers 1), чтобы не было двух
+# параллельных потребителей getUpdates (Telegram отдаёт апдейт только одному).
+# --------------------------------------------------------------------------
+def _bot_send_button(chat_id, text, button_text, url):
+    _tg_call("sendMessage", {
+        "chat_id": chat_id,
+        "text": text,
+        "reply_markup": {"inline_keyboard": [[{"text": button_text, "web_app": {"url": url}}]]},
+    })
+
+
+def _bot_poll_loop():
+    offset = 0
+    api = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
+    while True:
+        try:
+            data = json.dumps({"offset": offset, "timeout": 20}).encode()
+            req = urllib.request.Request(api, data=data, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=25) as resp:
+                result = json.loads(resp.read())
+        except Exception as e:  # 409 при пересечении деплоев, потеря сети и т.п.
+            time.sleep(5)
+            continue
+        for upd in result.get("result", []):
+            offset = upd["update_id"] + 1
+            msg = upd.get("message")
+            if not msg or "text" not in msg:
+                continue
+            text = msg["text"].strip()
+            chat_id = msg["chat"]["id"]
+            try:
+                if text.startswith("/start"):
+                    _bot_send_button(
+                        chat_id,
+                        "Добро пожаловать в Flowers Batum Flower 🌸\nНажмите кнопку, чтобы открыть каталог и оформить заказ.",
+                        "🌸 Открыть магазин", APP_URL,
+                    )
+                elif text.startswith("/admin"):
+                    _bot_send_button(
+                        chat_id,
+                        "Панель для персонала (доступ только у сотрудников из таблицы staff).",
+                        "🛠 Открыть админку", f"{APP_URL}/admin",
+                    )
+            except Exception as e:
+                print(f"[bot] ошибка обработки апдейта: {e}", flush=True)
+
+
+def start_bot_thread():
+    if BOT_TOKEN == "LOCAL_DEV_TOKEN" or not APP_URL:
+        return
+    if os.environ.get("RUN_BOT", "1") == "0":
+        return
+    threading.Thread(target=_bot_poll_loop, daemon=True).start()
+    print("[bot] long-poll поток запущен (/start, /admin)", flush=True)
 
 
 setup_bot_menu()
+start_bot_thread()
 
 
 # --------------------------------------------------------------------------

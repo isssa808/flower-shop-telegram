@@ -7,7 +7,14 @@
 import sqlite3
 import os
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "shop.db")
+# Путь к БД можно переопределить переменной DB_PATH — это нужно, чтобы на
+# Railway положить файл на постоянный Volume (например /data/shop.db) и не
+# терять товары/заказы при каждом редеплое. По умолчанию — рядом с кодом.
+DB_PATH = os.environ.get("DB_PATH", "").strip() or os.path.join(os.path.dirname(__file__), "shop.db")
+
+_db_dir = os.path.dirname(DB_PATH)
+if _db_dir:
+    os.makedirs(_db_dir, exist_ok=True)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS locations (
