@@ -99,6 +99,65 @@ STAFF_CHAT_ID = os.environ.get("STAFF_CHAT_ID")  # чат/канал персо�
 
 
 # --------------------------------------------------------------------------
+# Публичный адрес приложения. На Railway домен доступен в RAILWAY_PUBLIC_DOMAIN
+# (без схемы), но можно задать APP_URL явно — он имеет приоритет.
+# --------------------------------------------------------------------------
+def _public_app_url():
+    explicit = os.environ.get("APP_URL", "").strip().rstrip("/")
+    if explicit:
+        return explicit
+    domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").strip()
+    if domain:
+        return f"https://{domain}"
+    return ""
+
+
+APP_URL = _public_app_url()
+
+
+def _tg_call(method, payload):
+    """Тонкий вызов Bot API на stdlib. Возвращает True/False, не роняет старт."""
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return json.loads(resp.read()).get("ok", False)
+    except (urllib.error.URLError, TimeoutError, ValueError) as e:
+        app.logger.warning(f"[bot setup failed] {method}: {e}")
+        return False
+
+
+def setup_bot_menu():
+    """При старте вешаем постоянную кнопку-меню бота, открывающую Mini App.
+    Благодаря этому магазин открывается на телефоне прямо из чата с ботом —
+    отдельный вечно-живой процесс bot.py для этого не нужен."""
+    if BOT_TOKEN == "LOCAL_DEV_TOKEN":
+        app.logger.info("[bot setup skip] BOT_TOKEN не задан")
+        return
+    if not APP_URL:
+        app.logger.warning("[bot setup skip] APP_URL/RAILWAY_PUBLIC_DOMAIN не заданы")
+        return
+    ok_btn = _tg_call("setChatMenuButton", {
+        "menu_button": {
+            "type": "web_app",
+            "text": "🌸 Открыть магазин",
+            "web_app": {"url": APP_URL},
+        }
+    })
+    _tg_call("setMyCommands", {
+        "commands": [
+            {"command": "start", "description": "Открыть магазин"},
+            {"command": "admin", "description": "Панель персонала"},
+        ]
+    })
+    app.logger.info(f"[bot setup] menu button -> {APP_URL} (ok={ok_btn})")
+
+
+setup_bot_menu()
+
+
+# --------------------------------------------------------------------------
 # Авторизация. Telegram сам присылает initData на фронте — мы только
 # проверяем подпись и (для админки) ищем telegram_id в таблице staff.
 # --------------------------------------------------------------------------
