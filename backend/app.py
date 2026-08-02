@@ -63,34 +63,13 @@ def _too_large(_e):
 # --------------------------------------------------------------------------
 def bootstrap():
     conn = get_db()
-    # Диагностика персистентности: где лежит БД и есть ли уже данные ДО сева.
-    # Если при каждом старте products=0 — значит файл не на постоянном Volume.
+    # Короткий диагностический лог при старте: путь к БД и число строк. Помогает
+    # быстро увидеть в логах Railway, жива ли персистентность (при пустой БД на
+    # каждом старте — значит данные не на постоянном Volume, см. историю фикса).
     try:
-        _sz = os.path.getsize(DB_PATH) if os.path.exists(DB_PATH) else -1
         _pc = conn.execute("SELECT COUNT(*) c FROM products").fetchone()["c"]
-        _cc = conn.execute("SELECT COUNT(*) c FROM categories").fetchone()["c"]
         _oc = conn.execute("SELECT COUNT(*) c FROM orders").fetchone()["c"]
-        _jm = conn.execute("PRAGMA journal_mode").fetchone()[0]
-        _dir = os.path.dirname(DB_PATH) or "."
-        _files = []
-        for _f in sorted(os.listdir(_dir)):
-            try:
-                _files.append(f"{_f}:{os.path.getsize(os.path.join(_dir, _f))}")
-            except OSError:
-                _files.append(_f)
-        print(f"[db] DB_PATH={DB_PATH} size={_sz}B journal={_jm} products={_pc} categories={_cc} orders={_oc}", flush=True)
-        print(f"[db] {_dir} -> {_files}", flush=True)
-        # Тест сырой персистентности Volume, без SQLite: дописываем метку старта
-        # в файл на /data и считаем строки. Если Volume реально хранит данные —
-        # число строк растёт от деплоя к деплою. Если всегда 1 — /data эфемерен.
-        _marker = os.path.join(_dir, "persist_test.txt")
-        with open(_marker, "a", encoding="utf-8") as _mf:
-            _mf.write(f"boot {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-            _mf.flush()
-            os.fsync(_mf.fileno())
-        with open(_marker, "r", encoding="utf-8") as _mf:
-            _lines = _mf.read().splitlines()
-        print(f"[db] persist_test lines={len(_lines)} last={_lines[-2:]}", flush=True)
+        print(f"[db] DB_PATH={DB_PATH} products={_pc} orders={_oc}", flush=True)
     except Exception as _e:
         print(f"[db] diag failed: {_e}", flush=True)
     if not conn.execute("SELECT 1 FROM locations LIMIT 1").fetchone():
