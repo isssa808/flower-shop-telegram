@@ -96,6 +96,25 @@ def bootstrap():
     except OSError:
         pass
 
+    # Самовосстановление фото: если у товара photo_url — заглушка/пусто, но на
+    # Volume лежит его загруженный файл product_<id>.<ext>, вернуть ссылку. Чинит
+    # товары, у которых картинку затирало прежнее сохранение (баг PUT до фикса).
+    try:
+        for _r in conn.execute(
+            "SELECT id, photo_url FROM products WHERE photo_url IS NULL OR photo_url = '' "
+            "OR photo_url LIKE '%placeholder%'"
+        ).fetchall():
+            for _ext in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
+                if os.path.exists(os.path.join(UPLOAD_DIR, f"product_{_r['id']}{_ext}")):
+                    conn.execute(
+                        "UPDATE products SET photo_url=? WHERE id=?",
+                        (f"/static/uploads/product_{_r['id']}{_ext}?v={int(time.time())}", _r["id"]),
+                    )
+                    print(f"[db] photo relinked: product_{_r['id']}{_ext}", flush=True)
+                    break
+    except Exception as _e:
+        print(f"[db] photo relink failed: {_e}", flush=True)
+
     if not conn.execute("SELECT 1 FROM locations LIMIT 1").fetchone():
         conn.execute(
             "INSERT INTO locations (id, name, address) VALUES (1, ?, ?)",
@@ -846,15 +865,23 @@ def api_admin_product_edit(product_id):
         return jsonify({"deleted": product_id})
 
     body = request.get_json(force=True)
+    # Поля, которые всегда обновляем из формы. photo_url НЕ трогаем, если он не
+    # передан явно: фото грузится отдельным запросом /photo, а форма редактирования
+    # его не шлёт — иначе любое сохранение (напр. смена цены) затирало бы картинку.
+    fields = {
+        "name": body.get("name"),
+        "description": body.get("description", ""),
+        "composition": body.get("composition", ""),
+        "status": body.get("status", "in_stock"),
+        "occasion_tags": ",".join(body.get("occasion_tags", [])),
+        "is_addon": 1 if body.get("is_addon") else 0,
+    }
+    if body.get("photo_url"):
+        fields["photo_url"] = body["photo_url"]
+    set_clause = ", ".join(f"{k}=?" for k in fields)  # ключи — фикс. литералы, не ввод
     conn.execute(
-        "UPDATE products SET name=?, description=?, composition=?, status=?, "
-        "occasion_tags=?, photo_url=?, is_addon=? WHERE id=?",
-        (
-            body.get("name"), body.get("description", ""), body.get("composition", ""),
-            body.get("status", "in_stock"), ",".join(body.get("occasion_tags", [])),
-            body.get("photo_url", "/static/img/placeholder.svg"),
-            1 if body.get("is_addon") else 0, product_id,
-        ),
+        f"UPDATE products SET {set_clause} WHERE id=?",
+        (*fields.values(), product_id),
     )
     if "variants" in body:
         conn.execute("DELETE FROM product_variants WHERE product_id = ?", (product_id,))
