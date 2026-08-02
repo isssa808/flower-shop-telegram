@@ -788,7 +788,16 @@ function renderSettings() {
         },
         tg,
       });
-      showToast("Настройки сохранены");
+      const ct = state.settings.chat_test;
+      if (ct && ct.status === "ok") {
+        showToast("Сохранено ✓ В чат ушло проверочное сообщение");
+      } else if (ct && ct.status === "permanent") {
+        showToast("Сохранено, но бот НЕ может писать в этот чат. Проверьте ID: напишите /chatid в нужном чате и вставьте ответ.");
+      } else if (ct && ct.status === "transient") {
+        showToast("Сохранено. Проверка чата не прошла (сеть) — уведомления досылаются автоматически.");
+      } else {
+        showToast("Настройки сохранены");
+      }
       renderSettings();
     } catch (err) {
       showToast("Не удалось сохранить настройки");

@@ -217,11 +217,15 @@ NOTIFY_MAX_ATTEMPTS = 12
 
 
 def _send_message_api(chat_id, text, reply_markup=None):
-    """Один вызов sendMessage. Возвращает True при успехе. reply_markup — dict
-    или JSON-строка (для кнопки «Открыть в админке»)."""
+    """Один вызов sendMessage. Возвращает статус:
+      "ok"        — доставлено;
+      "permanent" — Telegram отклонил (неверный chat_id, бот не в чате, блок) —
+                    повторять бессмысленно;
+      "transient" — сеть/таймаут/5xx — можно повторить позже;
+      "skip"      — нечего слать (нет chat_id или тестовый токен)."""
     if not chat_id or BOT_TOKEN == "LOCAL_DEV_TOKEN":
         app.logger.info(f"[notify skip] to={chat_id}: {text}")
-        return False
+        return "skip"
     payload = {"chat_id": chat_id, "text": text}
     if reply_markup:
         payload["reply_markup"] = json.loads(reply_markup) if isinstance(reply_markup, str) else reply_markup
@@ -230,17 +234,27 @@ def _send_message_api(chat_id, text, reply_markup=None):
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=5) as resp:
-            return json.loads(resp.read()).get("ok", False)
+            return "ok" if json.loads(resp.read()).get("ok", False) else "permanent"
+    except urllib.error.HTTPError as e:
+        # 4xx (chat not found / bot kicked / blocked) — постоянная; 5xx — временная.
+        kind = "permanent" if 400 <= e.code < 500 else "transient"
+        app.logger.warning(f"[notify {kind}] to={chat_id}: HTTP {e.code}")
+        return kind
     except (urllib.error.URLError, TimeoutError, ValueError) as e:
-        app.logger.warning(f"[notify failed] to={chat_id}: {e}")
-        return False
+        app.logger.warning(f"[notify transient] to={chat_id}: {e}")
+        return "transient"
 
 
-def enqueue_notification(chat_id, text, reply_markup=None):
+def enqueue_notification(chat_id, text, reply_markup=None, fallback_chat_id=None):
     """Кладём уведомление в outbox (переживает падение сети) и сразу пробуем
-    отправить. Если не вышло — останется pending, фоновый поток досылает.
-    Заказ уже в БД к этому моменту, поэтому он не потеряется в любом случае."""
+    отправить. Заказ уже в БД, поэтому не потеряется в любом случае.
+    fallback_chat_id — куда доставить, если основной чат отклонён навсегда
+    (напр. в личку владельца, когда общий чат настроен с ошибкой) — чтобы не
+    было «тишины везде»."""
     if not chat_id:
+        # Если основного адреса нет, но есть запасной — шлём сразу туда.
+        if fallback_chat_id:
+            enqueue_notification(fallback_chat_id, text, reply_markup)
         return
     rm_json = json.dumps(reply_markup) if isinstance(reply_markup, dict) else reply_markup
     conn = get_db()
@@ -252,12 +266,24 @@ def enqueue_notification(chat_id, text, reply_markup=None):
     note_id = cur.lastrowid
     conn.commit()
     conn.close()
-    # Best-effort немедленная отправка (в проде BOT_TOKEN настоящий).
-    if BOT_TOKEN != "LOCAL_DEV_TOKEN" and _send_message_api(chat_id, text, rm_json):
+    if BOT_TOKEN == "LOCAL_DEV_TOKEN":
+        return
+    status = _send_message_api(chat_id, text, rm_json)
+    if status == "ok":
         conn = get_db()
         conn.execute("UPDATE notifications SET status='sent', attempts=1 WHERE id=?", (note_id,))
         conn.commit()
         conn.close()
+    elif status == "permanent":
+        conn = get_db()
+        conn.execute("UPDATE notifications SET status='failed', attempts=1 WHERE id=?", (note_id,))
+        conn.commit()
+        conn.close()
+        app.logger.error(f"[notify give up] id={note_id} chat={chat_id} (постоянная ошибка)")
+        # Откат: доставить запасному адресу (владельцу в личку), если он другой.
+        if fallback_chat_id and str(fallback_chat_id) != str(chat_id):
+            enqueue_notification(fallback_chat_id, text, reply_markup)
+    # transient — оставляем pending, досыл фоновым потоком
 
 
 # Совместимость со старым именем: обычное текстовое уведомление через outbox.
@@ -275,11 +301,14 @@ def _notify_process_pending():
     ).fetchall()
     conn.close()
     for r in rows:
-        ok = _send_message_api(r["chat_id"], r["text"], r["reply_markup"])
+        status = _send_message_api(r["chat_id"], r["text"], r["reply_markup"])
         conn = get_db()
-        if ok:
+        if status == "ok":
             conn.execute("UPDATE notifications SET status='sent', attempts=attempts+1 WHERE id=?", (r["id"],))
-        else:
+        elif status == "permanent":
+            conn.execute("UPDATE notifications SET status='failed', attempts=attempts+1 WHERE id=?", (r["id"],))
+            app.logger.error(f"[notify give up] id={r['id']} chat={r['chat_id']} (постоянная ошибка)")
+        else:  # transient / skip — считаем попытку, дойдём до лимита и сдадимся
             new_attempts = r["attempts"] + 1
             new_status = "failed" if new_attempts >= NOTIFY_MAX_ATTEMPTS else "pending"
             conn.execute(
@@ -1054,9 +1083,11 @@ def api_create_order():
     conn.close()
 
     # Уведомление в общий чат персонала — через outbox (не потеряется, досылается).
+    # fallback = личка владельца: если общий чат настроен с ошибкой, заказ всё равно дойдёт.
     enqueue_notification(
         resolve_staff_chat_id(),
         format_order_message(dict(order_row), [dict(i) for i in item_rows]),
+        fallback_chat_id=STAFF_CHAT_ID,
     )
     return jsonify({"id": order_id, "total": total, "delivery_fee": delivery_fee,
                     "items_total": items_total, "status": "new"}), 201
@@ -1447,10 +1478,21 @@ EDITABLE_SETTINGS = [
 @app.route("/api/admin/settings", methods=["GET", "PUT"])
 @require_owner
 def api_admin_settings():
+    chat_test = None  # результат проверки чата уведомлений (после сохранения)
     if request.method == "PUT":
         body = request.get_json(force=True)
         if "staff_chat_id" in body:
-            set_setting("staff_chat_id", (str(body.get("staff_chat_id") or "")).strip())
+            new_chat = (str(body.get("staff_chat_id") or "")).strip()
+            set_setting("staff_chat_id", new_chat)
+            # Сразу проверяем, что бот может писать в этот чат — чтобы неверный ID
+            # не приводил к «тихому» отвалу уведомлений. Тестовое сообщение шлём
+            # в эффективный чат (настройка или, если пусто, дефолт из env).
+            target = resolve_staff_chat_id()
+            if target:
+                status = _send_message_api(
+                    target, "✅ Сюда будут приходить уведомления о новых заказах Flowers Batum Flower."
+                )
+                chat_test = {"target": str(target), "status": status}
         for key in EDITABLE_SETTINGS:
             if key in body:
                 set_setting(key, (str(body.get(key) if body.get(key) is not None else "")).strip())
@@ -1478,6 +1520,8 @@ def api_admin_settings():
     }
     for key in EDITABLE_SETTINGS:
         result[key] = get_setting_or_default(key)
+    if chat_test is not None:
+        result["chat_test"] = chat_test
     return jsonify(result)
 
 
@@ -1559,7 +1603,8 @@ def api_admin_order_status(order_id):
         # Клиенту — в личку, персоналу — в общий чат (не только владельцу).
         if order["customer_tg_id"]:
             enqueue_notification(order["customer_tg_id"], f"Статус заказа #{order_id}: {label}")
-        enqueue_notification(resolve_staff_chat_id(), f"Заказ #{order_id}: статус → {label}")
+        enqueue_notification(resolve_staff_chat_id(), f"Заказ #{order_id}: статус → {label}",
+                             fallback_chat_id=STAFF_CHAT_ID)
     return jsonify(dict(order)) if order else (jsonify({"error": "not found"}), 404)
 
 
