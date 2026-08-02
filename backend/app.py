@@ -326,6 +326,85 @@ def require_staff(f):
     return wrapper
 
 
+def require_owner(f):
+    """Управление магазином (категории, персонал, настройки) — только владелец."""
+    @functools.wraps(f)
+    @require_staff
+    def wrapper(*args, **kwargs):
+        if g.staff.get("role") != "owner":
+            return jsonify({"error": "forbidden", "detail": "owner only"}), 403
+        return f(*args, **kwargs)
+    return wrapper
+
+
+# --------------------------------------------------------------------------
+# Настройки магазина в БД (таблица app_settings). Владелец меняет их из
+# админки без правки переменных окружения: чат для уведомлений о заказах,
+# название и адрес точки.
+# --------------------------------------------------------------------------
+def get_setting(key, default=None):
+    conn = get_db()
+    row = conn.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+    conn.close()
+    return row["value"] if row and row["value"] is not None else default
+
+
+def set_setting(key, value):
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO app_settings (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, value),
+    )
+    conn.commit()
+    conn.close()
+
+
+def resolve_staff_chat_id():
+    """Куда слать уведомления о новых заказах: сначала настройка из админки,
+    иначе переменные окружения (STAFF_CHAT_ID → OWNER_TELEGRAM_ID)."""
+    return (get_setting("staff_chat_id") or "").strip() or STAFF_CHAT_ID
+
+
+# Простая транслитерация для slug категории (имена — на русском). Slug виден
+# только в параметрах API (?category=...), не показывается покупателю.
+_TRANSLIT = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+    "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+    "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+    "ф": "f", "х": "h", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "sch",
+    "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+}
+
+
+def slugify(name):
+    out = []
+    for ch in (name or "").strip().lower():
+        if ch in _TRANSLIT:
+            out.append(_TRANSLIT[ch])
+        elif ch.isalnum():
+            out.append(ch)
+        elif ch in " -_":
+            out.append("-")
+    slug = "-".join(filter(None, "".join(out).split("-")))
+    return slug or "category"
+
+
+def unique_slug(conn, name, exclude_id=None):
+    base = slugify(name)
+    slug = base
+    i = 2
+    while True:
+        row = conn.execute(
+            "SELECT id FROM categories WHERE slug=? AND id IS NOT ?",
+            (slug, exclude_id),
+        ).fetchone()
+        if not row:
+            return slug
+        slug = f"{base}-{i}"
+        i += 1
+
+
 # --------------------------------------------------------------------------
 # Статика — отдаём customer- и admin-приложения одним сервером
 # --------------------------------------------------------------------------
@@ -519,7 +598,7 @@ def api_create_order():
     conn.commit()
     conn.close()
 
-    notify_telegram(STAFF_CHAT_ID, f"🌸 Новый заказ #{order_id} на {total} — {body.get('customer_name', '')}")
+    notify_telegram(resolve_staff_chat_id(), f"🌸 Новый заказ #{order_id} на {total} — {body.get('customer_name', '')}")
     return jsonify({"id": order_id, "total": total, "status": "new"}), 201
 
 
@@ -727,6 +806,188 @@ def api_admin_stock_writeoff(stock_id):
     if updated is None:
         return jsonify({"error": "not found"}), 404
     return jsonify(updated)
+
+
+# --------------------------------------------------------------------------
+# Админ API — категории (только владелец). Slug генерируется автоматически из
+# названия, покупателю не показывается. Удалять можно только пустую категорию.
+# --------------------------------------------------------------------------
+@app.route("/api/admin/categories", methods=["POST"])
+@require_owner
+def api_admin_category_create():
+    body = request.get_json(force=True)
+    name = (body.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "name required"}), 400
+    conn = get_db()
+    slug = unique_slug(conn, name)
+    # новый порядок — в конец списка
+    row = conn.execute("SELECT COALESCE(MAX(sort_order), 0) AS m FROM categories").fetchone()
+    sort_order = body.get("sort_order")
+    if sort_order is None:
+        sort_order = row["m"] + 1
+    cur = conn.execute(
+        "INSERT INTO categories (slug, name, sort_order) VALUES (?, ?, ?)",
+        (slug, name, sort_order),
+    )
+    conn.commit()
+    created = conn.execute("SELECT * FROM categories WHERE id=?", (cur.lastrowid,)).fetchone()
+    conn.close()
+    return jsonify(dict(created)), 201
+
+
+@app.route("/api/admin/categories/<int:category_id>", methods=["PUT", "DELETE"])
+@require_owner
+def api_admin_category_edit(category_id):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM categories WHERE id=?", (category_id,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "not found"}), 404
+
+    if request.method == "DELETE":
+        cnt = conn.execute(
+            "SELECT COUNT(*) AS c FROM products WHERE category_id=?", (category_id,)
+        ).fetchone()["c"]
+        if cnt:
+            conn.close()
+            return jsonify({
+                "error": "category not empty",
+                "detail": f"В категории {cnt} товар(ов). Перенесите их в другую категорию, потом удалите.",
+            }), 400
+        conn.execute("DELETE FROM categories WHERE id=?", (category_id,))
+        conn.commit()
+        conn.close()
+        return jsonify({"deleted": category_id})
+
+    body = request.get_json(force=True)
+    name = (body.get("name") or "").strip() or row["name"]
+    slug = unique_slug(conn, name, exclude_id=category_id) if name != row["name"] else row["slug"]
+    sort_order = body.get("sort_order")
+    if sort_order is None:
+        sort_order = row["sort_order"]
+    conn.execute(
+        "UPDATE categories SET name=?, slug=?, sort_order=? WHERE id=?",
+        (name, slug, sort_order, category_id),
+    )
+    conn.commit()
+    updated = conn.execute("SELECT * FROM categories WHERE id=?", (category_id,)).fetchone()
+    conn.close()
+    return jsonify(dict(updated))
+
+
+# --------------------------------------------------------------------------
+# Админ API — персонал (только владелец). Нельзя удалить самого себя и нельзя
+# убрать последнего владельца (иначе можно потерять доступ к админке).
+# --------------------------------------------------------------------------
+VALID_ROLES = ["owner", "florist", "courier"]
+
+
+@app.route("/api/admin/staff", methods=["GET", "POST"])
+@require_owner
+def api_admin_staff():
+    conn = get_db()
+    if request.method == "POST":
+        body = request.get_json(force=True)
+        tg_id = (str(body.get("telegram_id") or "")).strip()
+        name = (body.get("name") or "").strip()
+        role = body.get("role", "florist")
+        if not tg_id or not name:
+            conn.close()
+            return jsonify({"error": "telegram_id and name required"}), 400
+        if role not in VALID_ROLES:
+            conn.close()
+            return jsonify({"error": "invalid role", "valid": VALID_ROLES}), 400
+        if conn.execute("SELECT 1 FROM staff WHERE telegram_id=?", (tg_id,)).fetchone():
+            conn.close()
+            return jsonify({"error": "already staff", "detail": "Сотрудник с таким Telegram ID уже есть"}), 400
+        cur = conn.execute(
+            "INSERT INTO staff (telegram_id, name, role) VALUES (?, ?, ?)",
+            (tg_id, name, role),
+        )
+        conn.commit()
+        created = conn.execute("SELECT * FROM staff WHERE id=?", (cur.lastrowid,)).fetchone()
+        conn.close()
+        return jsonify(dict(created)), 201
+
+    rows = conn.execute("SELECT * FROM staff ORDER BY role='owner' DESC, name").fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/admin/staff/<int:staff_id>", methods=["PUT", "DELETE"])
+@require_owner
+def api_admin_staff_edit(staff_id):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM staff WHERE id=?", (staff_id,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "not found"}), 404
+    owners = conn.execute("SELECT COUNT(*) AS c FROM staff WHERE role='owner'").fetchone()["c"]
+    is_self = str(row["telegram_id"]) == str(g.tg_user["id"])
+
+    if request.method == "DELETE":
+        if is_self:
+            conn.close()
+            return jsonify({"error": "cannot remove self", "detail": "Нельзя удалить самого себя"}), 400
+        if row["role"] == "owner" and owners <= 1:
+            conn.close()
+            return jsonify({"error": "last owner", "detail": "Нельзя удалить последнего владельца"}), 400
+        conn.execute("DELETE FROM staff WHERE id=?", (staff_id,))
+        conn.commit()
+        conn.close()
+        return jsonify({"deleted": staff_id})
+
+    body = request.get_json(force=True)
+    name = (body.get("name") or "").strip() or row["name"]
+    role = body.get("role", row["role"])
+    if role not in VALID_ROLES:
+        conn.close()
+        return jsonify({"error": "invalid role", "valid": VALID_ROLES}), 400
+    # нельзя понизить последнего владельца — иначе некому управлять
+    if row["role"] == "owner" and role != "owner" and owners <= 1:
+        conn.close()
+        return jsonify({"error": "last owner", "detail": "Нельзя снять роль с последнего владельца"}), 400
+    conn.execute("UPDATE staff SET name=?, role=? WHERE id=?", (name, role, staff_id))
+    conn.commit()
+    updated = conn.execute("SELECT * FROM staff WHERE id=?", (staff_id,)).fetchone()
+    conn.close()
+    return jsonify(dict(updated))
+
+
+# --------------------------------------------------------------------------
+# Админ API — настройки магазина (только владелец): чат для уведомлений о
+# заказах, название и адрес точки. Хранятся в app_settings.
+# --------------------------------------------------------------------------
+@app.route("/api/admin/settings", methods=["GET", "PUT"])
+@require_owner
+def api_admin_settings():
+    if request.method == "PUT":
+        body = request.get_json(force=True)
+        if "staff_chat_id" in body:
+            set_setting("staff_chat_id", (str(body.get("staff_chat_id") or "")).strip())
+        if "shop_name" in body or "shop_address" in body:
+            conn = get_db()
+            conn.execute(
+                "UPDATE locations SET name=COALESCE(?, name), address=COALESCE(?, address) WHERE id=1",
+                (
+                    (body.get("shop_name") or "").strip() or None,
+                    body.get("shop_address"),
+                ),
+            )
+            conn.commit()
+            conn.close()
+    # актуальное состояние (после возможного PUT)
+    conn = get_db()
+    loc = conn.execute("SELECT name, address FROM locations WHERE id=1").fetchone()
+    conn.close()
+    return jsonify({
+        "staff_chat_id": get_setting("staff_chat_id", ""),
+        "staff_chat_id_effective": resolve_staff_chat_id() or "",
+        "staff_chat_id_env": STAFF_CHAT_ID or "",
+        "shop_name": loc["name"] if loc else "",
+        "shop_address": (loc["address"] if loc else "") or "",
+    })
 
 
 # --------------------------------------------------------------------------

@@ -115,6 +115,11 @@ CREATE TABLE IF NOT EXISTS order_items (
     price REAL NOT NULL,
     quantity INTEGER NOT NULL DEFAULT 1
 );
+
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
 """
 
 

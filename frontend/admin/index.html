@@ -41,6 +41,25 @@
         </div>
         <div id="stock-list"></div>
       </section>
+
+      <section id="view-settings" class="admin-view" style="display:none;">
+        <div class="admin-section-head">
+          <h2>Категории</h2>
+          <button class="btn btn-primary btn-sm" id="add-category-btn">+ Категория</button>
+        </div>
+        <div id="category-list"></div>
+
+        <div class="admin-section-head">
+          <h2>Персонал</h2>
+          <button class="btn btn-primary btn-sm" id="add-staff-btn">+ Сотрудник</button>
+        </div>
+        <div id="staff-list"></div>
+
+        <div class="admin-section-head">
+          <h2>Уведомления и магазин</h2>
+        </div>
+        <div id="settings-form-wrap"></div>
+      </section>
     </main>
   </div>
 
@@ -48,6 +67,7 @@
     <button class="nav-btn active" data-view="orders"><span class="nav-icon">📦</span><span>Заказы</span></button>
     <button class="nav-btn" data-view="catalog"><span class="nav-icon">🌷</span><span>Каталог</span></button>
     <button class="nav-btn" data-view="stock"><span class="nav-icon">📋</span><span>Склад</span></button>
+    <button class="nav-btn" data-view="settings" id="nav-settings" style="display:none;"><span class="nav-icon">⚙️</span><span>Настройки</span></button>
   </nav>
 
   <div class="sheet-backdrop" id="product-edit-backdrop" data-close="product-edit"></div>
@@ -66,6 +86,18 @@
   <div class="sheet" id="order-detail-sheet">
     <div class="sheet-handle"></div>
     <div id="order-detail-content"></div>
+  </div>
+
+  <div class="sheet-backdrop" id="category-edit-backdrop" data-close="category-edit"></div>
+  <div class="sheet" id="category-edit-sheet">
+    <div class="sheet-handle"></div>
+    <div id="category-edit-content"></div>
+  </div>
+
+  <div class="sheet-backdrop" id="staff-edit-backdrop" data-close="staff-edit"></div>
+  <div class="sheet" id="staff-edit-sheet">
+    <div class="sheet-handle"></div>
+    <div id="staff-edit-content"></div>
   </div>
 
   <div class="toast" id="toast"></div>
