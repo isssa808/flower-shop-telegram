@@ -1534,11 +1534,16 @@ def api_admin_orders():
     conn = get_db()
     query = "SELECT * FROM orders WHERE location_id = ?"
     params = [location_id]
+    # Курьер видит ТОЛЬКО назначенные ему заказы (свои доставки).
+    if g.staff.get("role") == "courier":
+        query += " AND assigned_staff_id = ?"
+        params.append(g.staff["id"])
     if status:
         query += " AND status = ?"
         params.append(status)
     query += " ORDER BY created_at DESC"
     rows = conn.execute(query, params).fetchall()
+    staff_names = {s["id"]: s["name"] for s in conn.execute("SELECT id, name FROM staff").fetchall()}
     result = []
     for r in rows:
         o = dict(r)
@@ -1548,6 +1553,7 @@ def api_admin_orders():
             (o["id"],),
         ).fetchall()
         o["items"] = [dict(i) for i in items]
+        o["assigned_courier_name"] = staff_names.get(o.get("assigned_staff_id"))
         result.append(o)
     conn.close()
     return jsonify(result)
@@ -1582,6 +1588,15 @@ def api_admin_order_status(order_id):
     if status not in VALID_STATUSES:
         return jsonify({"error": "invalid status", "valid": VALID_STATUSES}), 400
     conn = get_db()
+    # Курьер может отметить только «Доставлен» и только на своём заказе.
+    if g.staff.get("role") == "courier":
+        row = conn.execute("SELECT assigned_staff_id FROM orders WHERE id=?", (order_id,)).fetchone()
+        if not row or row["assigned_staff_id"] != g.staff["id"]:
+            conn.close()
+            return jsonify({"error": "forbidden", "detail": "Это не ваш заказ"}), 403
+        if status != "delivered":
+            conn.close()
+            return jsonify({"error": "forbidden", "detail": "Курьер может отметить только «Доставлен»"}), 403
     conn.execute(
         "UPDATE orders SET status=?, assigned_staff_id=COALESCE(?, assigned_staff_id) WHERE id=?",
         (status, body.get("assigned_staff_id"), order_id),
@@ -1604,6 +1619,58 @@ def api_admin_order_status(order_id):
         enqueue_notification(resolve_staff_chat_id(), f"Заказ #{order_id}: статус → {label}",
                              fallback_chat_id=STAFF_CHAT_ID)
     return jsonify(dict(order)) if order else (jsonify({"error": "not found"}), 404)
+
+
+# --------------------------------------------------------------------------
+# Админ API — курьеры и назначение на заказ. Владелец/флорист назначают курьера,
+# курьер получает уведомление в личку и видит заказ у себя.
+# --------------------------------------------------------------------------
+@app.route("/api/admin/couriers")
+@require_staff
+def api_admin_couriers():
+    conn = get_db()
+    rows = conn.execute("SELECT id, name FROM staff WHERE role='courier' ORDER BY name").fetchall()
+    conn.close()
+    return jsonify([{"id": r["id"], "name": r["name"]} for r in rows])
+
+
+@app.route("/api/admin/orders/<int:order_id>/assign", methods=["PUT"])
+@require_staff
+def api_admin_order_assign(order_id):
+    # Назначать курьера может владелец или флорист, но не сам курьер.
+    if g.staff.get("role") == "courier":
+        return jsonify({"error": "forbidden"}), 403
+    body = request.get_json(force=True)
+    courier_id = body.get("courier_id") or None
+    conn = get_db()
+    order = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
+    if not order:
+        conn.close()
+        return jsonify({"error": "not found"}), 404
+    courier = None
+    if courier_id:
+        courier = conn.execute(
+            "SELECT * FROM staff WHERE id=? AND role='courier'", (courier_id,)
+        ).fetchone()
+        if not courier:
+            conn.close()
+            return jsonify({"error": "invalid courier", "detail": "Курьер не найден"}), 400
+    conn.execute("UPDATE orders SET assigned_staff_id=? WHERE id=?", (courier_id, order_id))
+    conn.commit()
+    updated = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
+    conn.close()
+    # Уведомляем назначенного курьера в личку (он узнаёт о доставке через Telegram).
+    if courier:
+        addr = order["address"] or "—"
+        when = " ".join(x for x in [order["delivery_date"] or "", order["delivery_slot"] or ""] if x)
+        enqueue_notification(
+            courier["telegram_id"],
+            f"🛵 Вам назначена доставка заказа #{order_id}\n"
+            f"Адрес: {addr}\nКогда: {when or '—'}\n"
+            f"Получатель: {order['recipient_name'] or order['customer_name'] or '—'}\n"
+            f"Телефон: {order['recipient_phone'] or order['customer_phone'] or '—'}",
+        )
+    return jsonify(dict(updated))
 
 
 # --------------------------------------------------------------------------

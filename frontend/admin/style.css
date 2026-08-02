@@ -57,6 +57,14 @@
 .st-sum { font-size: 19px; font-weight: 800; color: var(--rose); }
 .st-count { font-weight: 800; color: var(--ink); }
 
+/* --- назначение курьера / экран курьера --- */
+.assign-box { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
+.assign-box > label { display: block; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-muted); margin-bottom: 8px; }
+.assign-row { display: flex; gap: 8px; align-items: center; }
+.assign-row select { flex: 1; }
+.order-card .btn-block { margin-top: 10px; }
+.courier-done { margin-top: 10px; font-weight: 700; color: var(--petrol); font-size: 13.5px; }
+
 .status-select {
   font-size: 12px; font-weight: 700; padding: 6px 10px; border-radius: 8px;
   border: 1.5px solid var(--border); background: var(--surface); color: var(--ink);

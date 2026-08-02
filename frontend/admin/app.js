@@ -22,6 +22,7 @@ const state = {
   settings: null,
   salesPeriod: "day",
   salesOrders: [],
+  couriers: [],
 };
 
 function showToast(msg) {
@@ -105,8 +106,12 @@ async function loadOrders() {
   if (state.orderFilter) params.set("status", state.orderFilter);
   state.orders = await apiFetch(`/api/admin/orders?${params}`, { tg });
 }
+async function loadCouriers() {
+  state.couriers = await apiFetch("/api/admin/couriers", { tg });
+}
 
 function renderOrders() {
+  if (isCourier()) return renderCourierOrders();
   const wrap = el("orders-list");
   if (!state.orders.length) {
     wrap.innerHTML = `<div class="empty-state">Заказов пока нет</div>`;
@@ -136,6 +141,7 @@ function renderOrders() {
       <div class="order-meta">
         ${o.fulfillment_type === "delivery" ? `Доставка: ${o.address || "—"} · ${o.delivery_date || ""} ${o.delivery_slot || ""}` : "Самовывоз"}<br/>
         ${o.items.map((i) => `${i.product_name} (${i.variant_label}) ×${i.quantity}`).join(", ")}
+        ${o.assigned_courier_name ? `<br/>🛵 Курьер: ${o.assigned_courier_name}` : ""}
         ${times ? `<br/><span class="order-times">${times}</span>` : ""}
       </div>
       <select class="status-select" data-order-id="${o.id}">
@@ -167,6 +173,60 @@ function renderOrders() {
   });
 }
 
+// Экран курьера: только его доставки, кнопка «Доставлено».
+function renderCourierOrders() {
+  const wrap = el("orders-list");
+  const active = state.orders.filter((o) => o.status !== "delivered" && o.status !== "cancelled");
+  const done = state.orders.filter((o) => o.status === "delivered");
+  if (!state.orders.length) {
+    wrap.innerHTML = `<div class="empty-state">Вам пока не назначены доставки</div>`;
+    return;
+  }
+  const card = (o, isDone) => {
+    const addr = o.fulfillment_type === "delivery" ? (o.address || "—") : "Самовывоз";
+    const when = [o.delivery_date || "", o.delivery_slot || ""].filter(Boolean).join(" ");
+    const phone = o.recipient_phone || o.customer_phone || "";
+    return `
+    <div class="card order-card">
+      <div class="order-card-top">
+        <div class="order-id">Заказ №${o.id}</div>
+        <div class="order-total">${money(o.total)}</div>
+      </div>
+      <div class="order-meta">
+        📍 ${addr}${when ? `<br/>🕒 ${when}` : ""}
+        ${phone ? `<br/>📞 <a href="tel:${phone}">${phone}</a>` : ""}<br/>
+        ${o.items.map((i) => `${i.product_name} ×${i.quantity}`).join(", ")}
+        ${o.card_message ? `<br/>Открытка: «${o.card_message}»` : ""}
+      </div>
+      ${isDone
+        ? `<div class="courier-done">✓ Доставлено${o.delivered_at ? ` · ${o.delivered_at}` : ""}</div>`
+        : `<button class="btn btn-primary btn-block" data-deliver="${o.id}">Доставлено</button>`}
+    </div>`;
+  };
+  wrap.innerHTML =
+    (active.length ? active.map((o) => card(o, false)).join("") : `<div class="empty-state">Активных доставок нет</div>`) +
+    (done.length ? `<div class="admin-section-head"><h2>Выполненные</h2></div>` + done.map((o) => card(o, true)).join("") : "");
+  wrap.querySelectorAll("[data-deliver]").forEach((b) =>
+    b.addEventListener("click", () => deliverOrder(Number(b.dataset.deliver)))
+  );
+}
+
+function deliverOrder(orderId) {
+  tg.showConfirm("Отметить заказ как доставленный?", async (ok) => {
+    if (!ok) return;
+    try {
+      await apiFetch(`/api/admin/orders/${orderId}/status`, {
+        method: "PUT", body: { status: "delivered" }, tg,
+      });
+      showToast("Отмечено «Доставлено»");
+      await loadOrders();
+      renderOrders();
+    } catch (err) {
+      showToast(err?.data?.detail || "Не удалось отметить");
+    }
+  });
+}
+
 function openOrderDetail(orderId) {
   const o = state.orders.find((x) => x.id === orderId);
   if (o) renderOrderDetail(o);
@@ -193,7 +253,36 @@ function renderOrderDetail(o) {
     ${o.delivery_fee ? `<div class="cart-line"><div class="cl-info"><div class="cl-name">Доставка</div></div><div class="cl-price">${money(o.delivery_fee)}</div></div>` : ""}
     <div class="cart-total"><span>Итого</span><span>${money(o.total)}</span></div>
     ${timeRows.length ? `<div class="order-meta" style="margin-top:12px;">${timeRows.map(([l, v]) => `${l}: ${v}`).join("<br/>")}</div>` : ""}
+    ${!isCourier() ? `
+    <div class="assign-box">
+      <label>Курьер</label>
+      <div class="assign-row">
+        <select id="assign-courier">
+          <option value="">— не назначен —</option>
+          ${state.couriers.map((c) => `<option value="${c.id}" ${o.assigned_staff_id === c.id ? "selected" : ""}>${c.name}</option>`).join("")}
+        </select>
+        <button class="btn btn-outline btn-sm" id="assign-btn">Назначить</button>
+      </div>
+      ${state.couriers.length ? "" : `<div class="cr-meta" style="margin-top:6px;">Курьеров пока нет${isOwner() ? " — добавьте в разделе Персонал (роль «Курьер»)" : ""}.</div>`}
+    </div>` : ""}
   `;
+  const assignBtn = el("assign-btn");
+  if (assignBtn) {
+    assignBtn.addEventListener("click", async () => {
+      const cid = el("assign-courier").value;
+      try {
+        await apiFetch(`/api/admin/orders/${o.id}/assign`, {
+          method: "PUT", body: { courier_id: cid ? Number(cid) : null }, tg,
+        });
+        showToast(cid ? "Курьер назначен" : "Курьер снят");
+        closeSheet("order-detail");
+        await loadOrders();
+        renderOrders();
+      } catch (err) {
+        showToast(err?.data?.detail || "Не удалось назначить курьера");
+      }
+    });
+  }
   openSheet("order-detail");
 }
 
@@ -531,6 +620,9 @@ el("add-stock-btn").addEventListener("click", () => {
 // ---------------------------------------------------------------------
 function isOwner() {
   return state.staff && state.staff.role === "owner";
+}
+function isCourier() {
+  return state.staff && state.staff.role === "courier";
 }
 
 // --- Категории ---
@@ -897,9 +989,21 @@ async function init() {
   el("admin-main").style.display = "block";
   el("bottom-nav").style.display = "flex";
 
-  // Заказы доступны и владельцу, и флористу.
-  renderOrderTabs();
   await loadOrders();
+
+  // Курьер: только свои доставки. Без вкладок-статусов и прочих разделов.
+  if (isCourier()) {
+    el("order-status-tabs").innerHTML = "";
+    document
+      .querySelectorAll('.nav-btn[data-view="catalog"], .nav-btn[data-view="stock"]')
+      .forEach((b) => (b.style.display = "none"));
+    renderOrders();
+    return;
+  }
+
+  // Владелец и флорист: заказы + назначение курьеров.
+  renderOrderTabs();
+  try { await loadCouriers(); } catch (e) { /* назначать будет нечем, не критично */ }
   renderOrders();
 
   if (isOwner()) {
