@@ -1,0 +1,54 @@
+/* Стили карточки товара (шторка) — ОБЩИЕ для витрины и превью в админке.
+   Единый источник, чтобы превью 1:1 совпадало с реальной карточкой.
+   Подключается и в customer/index.html, и в admin/index.html. */
+
+.pd-photo { width: 100%; aspect-ratio: 1/1; border-radius: var(--radius-m); overflow: hidden; background: var(--surface); margin-bottom: 14px; }
+.pd-photo img { width: 100%; height: 100%; object-fit: cover; }
+.pd-title { font-size: 20px; margin-bottom: 6px; }
+
+/* строка мета: бейдж + лайки + число заказов */
+.pd-meta { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+.pd-badge { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em; padding: 4px 10px; border-radius: 999px; }
+.pd-badge.badge-new { background: var(--green-soft); color: var(--leaf); }
+.pd-badge.badge-hit { background: var(--rose); color: #fff; }
+.pd-badge.badge-recommended { background: var(--rose-soft); color: var(--rose); }
+.pd-like { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 700; color: var(--ink-muted); background: none; border: none; cursor: pointer; padding: 0; font-family: var(--font-body); }
+.pd-like svg { width: 17px; height: 17px; }
+.pd-like.on { color: var(--rose); }
+.pd-like.on svg { fill: var(--rose); }
+.pd-orders { font-size: 12.5px; color: var(--ink-muted); }
+
+.pd-price-lead { font-size: 18px; font-weight: 800; color: var(--rose); margin-bottom: 12px; }
+.pd-desc { color: var(--ink-muted); font-size: 14px; line-height: 1.55; margin-bottom: 12px; }
+.pd-desc.clamp { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.pd-more { background: none; border: none; padding: 0; margin: -4px 0 12px; color: var(--petrol); font-size: 13px; font-weight: 600; cursor: pointer; font-family: var(--font-body); text-decoration: underline; }
+.pd-composition { font-size: 13px; color: var(--ink-muted); margin-bottom: 16px; }
+.pd-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--faint); font-weight: 700; margin-bottom: 8px; }
+
+.pd-note { background: var(--rose-soft); color: var(--rose-dark); border-radius: 12px; padding: 11px 13px; font-size: 12.5px; line-height: 1.5; margin: 4px 0 16px; }
+.pd-benefits { display: flex; flex-direction: column; gap: 11px; margin-bottom: 20px; }
+.pd-benefit { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--ink); }
+.pd-bic { flex: none; width: 22px; height: 22px; color: var(--petrol); }
+.pd-bic svg { width: 22px; height: 22px; }
+
+.variant-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 18px; }
+.variant-pill {
+  padding: 10px 14px; border-radius: 13px; border: 1.5px solid var(--border);
+  background: var(--surface-2); cursor: pointer; font-size: 13.5px; text-align: left; line-height: 1.3; color: var(--ink);
+}
+.variant-pill .v-price { display: block; font-weight: 700; color: var(--rose); margin-top: 2px; }
+.variant-pill.active { border-color: var(--rose); background: var(--rose-soft); }
+.qty-row { display: flex; align-items: center; gap: 14px; margin-bottom: 16px; }
+.qty-btn {
+  width: 36px; height: 36px; border-radius: 50%; border: 1.5px solid var(--border);
+  background: var(--surface-2); font-size: 18px; cursor: pointer; color: var(--ink);
+}
+.qty-value { font-weight: 700; font-size: 16px; min-width: 20px; text-align: center; }
+
+.pd-accs { margin: 6px 0 4px; border-top: 1px solid var(--border); }
+.pd-acc { border-bottom: 1px solid var(--border); }
+.pd-acc-head { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; background: none; border: none; padding: 14px 2px; font-family: var(--font-body); font-size: 14px; font-weight: 600; color: var(--ink); cursor: pointer; text-align: left; }
+.pd-acc-chev { color: var(--faint); transition: transform 0.2s ease; flex: none; }
+.pd-acc.open .pd-acc-chev { transform: rotate(180deg); }
+.pd-acc-body { max-height: 0; overflow: hidden; transition: max-height 0.25s ease; font-size: 13.5px; color: var(--ink-muted); line-height: 1.55; }
+.pd-acc.open .pd-acc-body { max-height: 600px; padding: 0 2px 14px; }

@@ -1,7 +1,10 @@
 import { getTelegram, apiFetch, initFullscreen } from "/shared/telegram.js";
+import { buildProductSheetHtml } from "/shared/product-view.js";
+import { t, setLang } from "/shared/i18n.js";
 
 const tg = getTelegram();
 initFullscreen(tg);
+setLang("ru"); // админка русскоязычная; превью показываем на русском
 
 const LOCATION_ID = 1;
 const el = (id) => document.getElementById(id);
@@ -177,21 +180,74 @@ function renderCatalog() {
     <div class="card catalog-row">
       <img src="${p.photo_url}" alt=""/>
       <div class="cr-info">
-        <div class="cr-name">${p.name}</div>
+        <div class="cr-name">${p.name}${badgeRu(p.badge) ? ` <span class="badge badge-rose">${badgeRu(p.badge)}</span>` : ""}</div>
         <div class="cr-meta">${p.variants.map((v) => money(v.price)).join(" / ") || "без цены"} · ${statusLabelRu(p.status)}</div>
+        <div class="cr-meta">♥ ${p.likes || 0} · заказов ${p.order_count || 0}</div>
       </div>
       <div class="cr-actions">
+        <button class="btn-icon" data-preview="${p.id}" aria-label="Превью">👁</button>
         <button class="btn-icon" data-edit="${p.id}" aria-label="Редактировать">✎</button>
         <button class="btn-icon" data-delete="${p.id}" aria-label="Удалить">🗑</button>
       </div>
     </div>`
     )
     .join("");
+  wrap.querySelectorAll("[data-preview]").forEach((b) => b.addEventListener("click", () => previewProduct(state.products.find((x) => x.id === Number(b.dataset.preview)))));
   wrap.querySelectorAll("[data-edit]").forEach((b) => b.addEventListener("click", () => openProductEdit(Number(b.dataset.edit))));
   wrap.querySelectorAll("[data-delete]").forEach((b) => b.addEventListener("click", () => deleteProduct(Number(b.dataset.delete))));
 }
 
 el("add-product-btn").addEventListener("click", () => openProductEdit(null));
+
+function badgeRu(b) { return { hit: "Хит", new: "Новинка", recommended: "Рекомендуем" }[b] || ""; }
+
+// --- Превью товара «как на витрине» (общий модуль shared/product-view.js) ---
+function shopForPreview() {
+  const s = state.settings || {};
+  return {
+    address: s.shop_address,
+    disclaimer_note: s.disclaimer_note,
+    express_delivery_text: s.express_delivery_text,
+    delivery_payment_info: s.delivery_payment_info,
+  };
+}
+function formToProduct(variantEditor, existing) {
+  const fd = new FormData(el("product-form"));
+  const variants = [...variantEditor.querySelectorAll(".variant-editor-row")]
+    .map((row) => ({ id: -1, label: row.querySelector(".v-label").value, price: parseFloat(row.querySelector(".v-price").value) || 0 }))
+    .filter((v) => v.label);
+  return {
+    id: existing?.id ?? -1,
+    name: fd.get("name") || "—",
+    description: fd.get("description") || "",
+    composition: fd.get("composition") || "",
+    status: fd.get("status") || "in_stock",
+    badge: fd.get("badge") || "",
+    is_addon: fd.get("is_addon") ? 1 : 0,
+    photo_url: existing?.photo_url || "/static/img/placeholder.svg",
+    likes: existing?.likes || 0,
+    order_count: existing?.order_count || 0,
+    variants: variants.length ? variants : [{ id: -1, label: "—", price: 0 }],
+  };
+}
+let previewDescExpanded = false;
+function renderPreview(p) {
+  el("product-preview-content").innerHTML = buildProductSheetHtml(p, {
+    t, money, shop: shopForPreview(), mode: "preview",
+    selectedVariantId: p.variants[0]?.id ?? null, descExpanded: previewDescExpanded,
+  });
+  const dt = el("product-preview-content").querySelector("#desc-toggle");
+  if (dt) dt.addEventListener("click", () => { previewDescExpanded = !previewDescExpanded; renderPreview(p); });
+  el("product-preview-content").querySelectorAll(".pd-acc-head").forEach((h) =>
+    h.addEventListener("click", () => h.parentElement.classList.toggle("open"))
+  );
+}
+function previewProduct(p) {
+  if (!p) return;
+  previewDescExpanded = false;
+  renderPreview(p);
+  openSheet("product-preview");
+}
 
 function openProductEdit(productId) {
   const p = productId ? state.products.find((x) => x.id === productId) : null;
@@ -213,6 +269,14 @@ function openProductEdit(productId) {
           <option value="hidden" ${p?.status === "hidden" ? "selected" : ""}>Скрыт</option>
         </select>
       </div>
+      <div class="field"><label>Отметка на витрине</label>
+        <select name="badge">
+          <option value="" ${!p?.badge ? "selected" : ""}>Без отметки</option>
+          <option value="hit" ${p?.badge === "hit" ? "selected" : ""}>Хит</option>
+          <option value="new" ${p?.badge === "new" ? "selected" : ""}>Новинка</option>
+          <option value="recommended" ${p?.badge === "recommended" ? "selected" : ""}>Рекомендуем</option>
+        </select>
+      </div>
       <div class="field"><label>Повод (через запятую)</label><input name="occasion_tags" value="${(p?.occasion_tags || []).join(", ")}"/></div>
       <label class="checkbox-row" style="margin:2px 0 14px;">
         <input type="checkbox" name="is_addon" ${p?.is_addon ? "checked" : ""}/>
@@ -225,6 +289,7 @@ function openProductEdit(productId) {
         <button type="button" class="btn btn-outline btn-sm" id="add-variant-row">+ вариант</button>
       </div>
       <div class="form-actions">
+        <button type="button" class="btn btn-outline" id="preview-product">Превью</button>
         <button type="button" class="btn btn-secondary" data-close="product-edit">Отмена</button>
         <button type="submit" class="btn btn-primary">Сохранить</button>
       </div>
@@ -244,6 +309,7 @@ function openProductEdit(productId) {
   variants.forEach((v) => addVariantRow(v.label, v.price));
   el("add-variant-row").addEventListener("click", () => addVariantRow());
   document.querySelectorAll("#product-edit-content [data-close]").forEach((b) => b.addEventListener("click", () => closeSheet("product-edit")));
+  el("preview-product").addEventListener("click", () => previewProduct(formToProduct(variantEditor, p)));
 
   el("product-form").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -264,6 +330,7 @@ function openProductEdit(productId) {
       status: fd.get("status"),
       occasion_tags: fd.get("occasion_tags").split(",").map((s) => s.trim()).filter(Boolean),
       is_addon: fd.get("is_addon") ? 1 : 0,
+      badge: fd.get("badge") || "",
       variants: variantRows,
     };
 

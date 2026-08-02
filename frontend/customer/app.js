@@ -1,5 +1,6 @@
 import { getTelegram, apiFetch, initFullscreen } from "/shared/telegram.js";
 import { t, getLang, setLang, detectLang, applyDomI18n } from "/shared/i18n.js";
+import { buildProductSheetHtml, priceOf, badgeLabel } from "/shared/product-view.js";
 
 const tg = getTelegram();
 initFullscreen(tg);
@@ -18,6 +19,8 @@ const state = {
   favorites: new Set(),
   theme: "system", // light | dark | system
   lang: "ru",      // ru | en
+  haptics: true,   // минимальная вибрация, тумблер в профиле
+  filter: { sort: "default", badge: "", availability: "", priceMin: null, priceMax: null },
   cart: [], // { productId, name, photo, variantId, variantLabel, price, quantity }
   currentProduct: null,
   selectedVariantId: null,
@@ -42,6 +45,16 @@ function showToast(msg) {
 // закрытии/переходе между шторками (частый баг «клавиатура не убирается»).
 function blurActive() {
   try { document.activeElement?.blur?.(); } catch (_) {}
+}
+
+// Минимальная тактильная отдача; отключается тумблером в профиле (state.haptics).
+function haptic(kind) {
+  if (state.haptics === false) return;
+  try {
+    if (kind === "success") tg.HapticFeedback?.notificationOccurred?.("success");
+    else if (kind === "select") tg.HapticFeedback?.selectionChanged?.();
+    else tg.HapticFeedback?.impactOccurred?.("light");
+  } catch (_) {}
 }
 
 // --- Навигация по шторкам + системная кнопка «Назад» Telegram ---------
@@ -101,7 +114,7 @@ function applyI18n() {
   applyDomI18n(document);
   // перерисовать открытые/фоновые экраны, чтобы динамические строки обновились
   renderTabs();
-  renderProductGrid(state.view === "favorites" ? undefined : state.products);
+  if (state.view === "favorites") showFavorites(); else renderProductGrid(state.products);
   updateCartBar();
   const top = curSheet();
   if (top === "product" && state.currentProduct) renderProductSheet();
@@ -163,6 +176,7 @@ function renderTabs() {
       state.activeCategory = c.slug;
       renderTabs();
       loadProducts();
+      scrollTop();
     });
     tabs.appendChild(btn);
   });
@@ -177,18 +191,19 @@ function findProduct(id) {
   );
 }
 
-function priceOf(p) {
-  const prices = p.variants.map((v) => v.price).filter((x) => x > 0);
-  return prices.length ? Math.min(...prices) : null;
-}
-
 function productCardHtml(p) {
   const minPrice = priceOf(p);
   const priceLabel = minPrice
     ? `<span class="pc-price"><small>${t("from_price")}</small> ${money(minPrice)}</span>`
     : `<span class="pc-price">${t("on_request")}</span>`;
   const fav = state.favorites.has(p.id) ? " on" : "";
-  const tag = p.status === "made_to_order" ? `<span class="pc-tag made">${t("made_to_order")}</span>` : "";
+  const blabel = badgeLabel(t, p.badge);
+  const tag = blabel
+    ? `<span class="pc-tag ${p.badge}">${blabel}</span>`
+    : (p.status === "made_to_order" ? `<span class="pc-tag made">${t("made_to_order")}</span>` : "");
+  const likes = p.likes > 0
+    ? `<div class="pc-likes"><svg viewBox="0 0 24 24" stroke="none"><path d="M12 21C12 21 4 14.5 4 8.8C4 5.9 6.2 4 8.6 4C10.2 4 11.4 4.9 12 6C12.6 4.9 13.8 4 15.4 4C17.8 4 20 5.9 20 8.8C20 14.5 12 21 12 21Z"/></svg>${p.likes}${p.order_count > 0 ? `<span class="pc-orders">· ${t("ordered_times", { n: p.order_count })}</span>` : ""}</div>`
+    : (p.order_count > 0 ? `<div class="pc-likes"><span class="pc-orders">${t("ordered_times", { n: p.order_count })}</span></div>` : "");
   return `
     <div class="product-card" data-product="${p.id}">
       <div class="photo">
@@ -200,19 +215,46 @@ function productCardHtml(p) {
       </div>
       <div class="info">
         <div class="pc-name">${p.name}</div>
+        ${likes}
         <div class="pc-row">${priceLabel}<button class="pc-plus" data-add="${p.id}" type="button" aria-label="add">+</button></div>
       </div>
     </div>`;
 }
 
+// Активен ли хоть один фильтр/сортировка (для подсветки кнопки «Фильтры»).
+function filterActive() {
+  const f = state.filter;
+  return f.sort !== "default" || !!f.badge || !!f.availability || f.priceMin != null || f.priceMax != null;
+}
+
+// Применить фильтры и сортировку из state.filter к списку товаров.
+function applyFilterSort(list) {
+  const f = state.filter;
+  let out = list.filter((p) => {
+    if (f.badge && p.badge !== f.badge) return false;
+    if (f.availability === "in_stock" && p.status !== "in_stock") return false;
+    if (f.availability === "made_to_order" && p.status !== "made_to_order") return false;
+    const price = priceOf(p);
+    if (f.priceMin != null && (price == null || price < f.priceMin)) return false;
+    if (f.priceMax != null && (price == null || price > f.priceMax)) return false;
+    return true;
+  });
+  if (f.sort === "popular") out = [...out].sort((a, b) => (b.order_count - a.order_count) || (b.likes - a.likes));
+  else if (f.sort === "price_asc") out = [...out].sort((a, b) => (priceOf(a) ?? 1e9) - (priceOf(b) ?? 1e9));
+  else if (f.sort === "price_desc") out = [...out].sort((a, b) => (priceOf(b) ?? -1) - (priceOf(a) ?? -1));
+  return out;
+}
+
 function renderProductGrid(list = state.products) {
   const grid = el("product-grid");
-  if (!list.length) {
+  let items = state.view === "catalog" ? applyFilterSort(list) : list;
+  el("filter-btn")?.classList.toggle("filter-active", state.view === "catalog" && filterActive());
+  if (!items.length) {
     const msg = state.view === "favorites" ? t("fav_empty") : t("nothing_found");
     grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1;"><div class="icon">🌾</div>${msg}</div>`;
     return;
   }
-  grid.innerHTML = list.map(productCardHtml).join("");
+  grid.innerHTML = items.map(productCardHtml).join("");
   grid.querySelectorAll("[data-product]").forEach((card) =>
     card.addEventListener("click", (e) => {
       if (e.target.closest("[data-fav]") || e.target.closest("[data-add]")) return;
@@ -245,25 +287,58 @@ function quickAdd(p) {
       productId: p.id, name: p.name, photo: p.photo_url,
       variantId: variant.id, variantLabel: variant.label, price: variant.price, quantity: 1,
     });
-  tg.HapticFeedback?.impactOccurred?.("light");
+  haptic();
   updateCartBar();
   showToast(t("added_to_cart"));
 }
 
-function toggleFavorite(id, btnEl) {
-  if (state.favorites.has(id)) state.favorites.delete(id);
-  else state.favorites.add(id);
-  if (btnEl) btnEl.classList.toggle("on", state.favorites.has(id));
-  saveFavorites();
-  tg.HapticFeedback?.selectionChanged?.();
+// Применить функцию ко всем копиям товара во всех загруженных списках.
+function eachProduct(id, fn) {
+  for (const arr of [state.products, state.allProducts || [], state.addons]) {
+    for (const p of arr) if (p.id === id) fn(p);
+  }
+  if (state.currentProduct && state.currentProduct.id === id) fn(state.currentProduct);
+}
+function bumpLikes(id, delta) { eachProduct(id, (p) => { p.likes = Math.max(0, (p.likes || 0) + delta); }); }
+function setLikes(id, likes) { eachProduct(id, (p) => { p.likes = likes; }); }
+function refreshLikeViews() {
   if (state.view === "favorites") showFavorites();
+  else renderProductGrid();
+  if (curSheet() === "product" && state.currentProduct) renderProductSheet();
+}
+
+// Лайк/избранное на сервере. Оптимистично обновляем UI, при ошибке откатываем.
+async function toggleFavorite(id, btnEl) {
+  const nowFav = !state.favorites.has(id);
+  if (nowFav) state.favorites.add(id); else state.favorites.delete(id);
+  if (btnEl) {
+    btnEl.classList.toggle("on", nowFav);
+    btnEl.classList.remove("pop"); void btnEl.offsetWidth; btnEl.classList.add("pop");
+  }
+  haptic();
+  bumpLikes(id, nowFav ? 1 : -1);
+  try {
+    const res = await apiFetch(`/api/favorites/${id}`, { method: "POST", tg });
+    if (res && typeof res.likes === "number") setLikes(id, res.likes);
+  } catch (_) {
+    if (nowFav) state.favorites.delete(id); else state.favorites.add(id);
+    bumpLikes(id, nowFav ? -1 : 1);
+  }
+  refreshLikeViews();
 }
 
 let searchTimer;
+function syncSearchClear() { const b = el("search-clear"); if (b) b.hidden = !el("search-input").value; }
 el("search-input").addEventListener("input", (e) => {
   clearTimeout(searchTimer);
   state.search = e.target.value.trim();
+  syncSearchClear();
   searchTimer = setTimeout(loadProducts, 300);
+});
+el("search-clear")?.addEventListener("click", () => {
+  const inp = el("search-input");
+  inp.value = ""; state.search = ""; syncSearchClear();
+  loadProducts(); inp.focus();
 });
 
 // ---------------------------------------------------------------------
@@ -307,82 +382,15 @@ function openProduct(p) {
   navPush("product");
 }
 
-function benefitRow(icon, text) {
-  return `<div class="pd-benefit"><span class="pd-bic">${icon}</span><span>${text}</span></div>`;
-}
-function accordion(id, title, body) {
-  if (!body) return "";
-  return `
-    <div class="pd-acc" data-acc="${id}">
-      <button class="pd-acc-head" type="button">${title}
-        <svg class="pd-acc-chev" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
-      </button>
-      <div class="pd-acc-body">${body}</div>
-    </div>`;
-}
-
 function renderProductSheet() {
   const p = state.currentProduct;
-  const s = state.shop || {};
-  const variantsHtml = p.variants
-    .map(
-      (v) => `
-      <button class="variant-pill ${v.id === state.selectedVariantId ? "active" : ""}" data-variant="${v.id}">
-        ${v.label}
-        <span class="v-price">${v.price > 0 ? money(v.price) : t("on_request")}</span>
-      </button>`
-    )
-    .join("");
-
-  const minP = priceOf(p);
-  const leadPrice = minP ? `${t("from_price")} ${money(minP)}` : t("on_request");
-
-  const desc = p.description || "";
-  const isLong = desc.length > 120;
-  const descBlock = desc
-    ? `<div class="pd-desc ${isLong && !state.descExpanded ? "clamp" : ""}">${desc}</div>
-       ${isLong ? `<button class="pd-more" id="desc-toggle" type="button">${state.descExpanded ? t("collapse") : t("see_full_desc")}</button>` : ""}`
-    : "";
-
-  const note = (s.disclaimer_note || t("note_default"));
-  const express = (s.express_delivery_text || t("express_default"));
-  const deliveryInfo = (s.delivery_payment_info || t("delivery_info_default"));
-  const ICON_GIFT = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 12v8H4v-8"/><path d="M2 7h20v5H2z"/><path d="M12 22V7"/><path d="M12 7S9 7 8 5.5 9 3 10 4s2 3 2 3zM12 7s3 0 4-1.5S15 3 14 4s-2 3-2 3z"/></svg>`;
-  const ICON_TRUCK = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h11v9H3zM14 9h4l3 3v3h-7z"/><circle cx="7" cy="18" r="1.6"/><circle cx="17.5" cy="18" r="1.6"/></svg>`;
-  const ICON_STORE = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 9h16l-1 11H5z"/><path d="M4 9l1.2-4h13.6L20 9"/></svg>`;
-
-  el("product-sheet-content").innerHTML = `
-    <div class="pd-photo"><img src="${p.photo_url}" alt="${p.name}" /></div>
-    <h2 class="pd-title">${p.name}</h2>
-    <div class="pd-price-lead">${leadPrice}</div>
-    ${descBlock}
-
-    <div class="pd-note">${note}</div>
-
-    <div class="pd-benefits">
-      ${benefitRow(ICON_GIFT, t("benefit_packaging"))}
-      ${benefitRow(ICON_TRUCK, `${t("benefit_express")} · ${express}`)}
-      ${benefitRow(ICON_STORE, s.address ? `${t("benefit_pickup")} — ${s.address}` : t("benefit_pickup"))}
-    </div>
-
-    <div class="pd-label">${t("size")}</div>
-    <div class="variant-row" id="variant-row">${variantsHtml}</div>
-    <div class="pd-label">${t("quantity")}</div>
-    <div class="qty-row">
-      <button class="qty-btn" id="qty-minus">−</button>
-      <span class="qty-value" id="qty-value">${state.selectedQty}</span>
-      <button class="qty-btn" id="qty-plus">+</button>
-    </div>
-    <button class="btn btn-primary btn-block" id="add-to-cart-btn">${t("add_to_cart")}</button>
-
-    <div class="pd-accs">
-      ${accordion("desc", t("acc_description"), p.description || "")}
-      ${accordion("comp", t("acc_composition"), p.composition || "")}
-      ${accordion("deliv", t("acc_delivery"), deliveryInfo)}
-    </div>
-
-    <div id="product-addons"></div>
-  `;
+  el("product-sheet-content").innerHTML = buildProductSheetHtml(p, {
+    t, money, shop: state.shop || {}, mode: "full",
+    liked: state.favorites.has(p.id),
+    descExpanded: state.descExpanded,
+    selectedVariantId: state.selectedVariantId,
+    selectedQty: state.selectedQty,
+  });
 
   document.querySelectorAll("#variant-row .variant-pill").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -390,15 +398,15 @@ function renderProductSheet() {
       renderProductSheet();
     });
   });
-  el("qty-minus").addEventListener("click", () => {
+  el("qty-minus")?.addEventListener("click", () => {
     state.selectedQty = Math.max(1, state.selectedQty - 1);
     el("qty-value").textContent = state.selectedQty;
   });
-  el("qty-plus").addEventListener("click", () => {
+  el("qty-plus")?.addEventListener("click", () => {
     state.selectedQty += 1;
     el("qty-value").textContent = state.selectedQty;
   });
-  el("add-to-cart-btn").addEventListener("click", addSelectedToCart);
+  el("add-to-cart-btn")?.addEventListener("click", addSelectedToCart);
 
   const dtoggle = el("desc-toggle");
   if (dtoggle) dtoggle.addEventListener("click", () => { state.descExpanded = !state.descExpanded; renderProductSheet(); });
@@ -406,6 +414,9 @@ function renderProductSheet() {
   document.querySelectorAll("#product-sheet-content .pd-acc-head").forEach((h) =>
     h.addEventListener("click", () => h.parentElement.classList.toggle("open"))
   );
+
+  const likeBtn = document.querySelector("#product-sheet-content .pd-like[data-like]");
+  if (likeBtn) likeBtn.addEventListener("click", () => toggleFavorite(p.id, likeBtn));
 
   const addonBox = el("product-addons");
   if (addonBox && state.currentProduct && !state.currentProduct.is_addon) {
@@ -424,7 +435,7 @@ function addSelectedToCart() {
       productId: p.id, name: p.name, photo: p.photo_url,
       variantId: variant.id, variantLabel: variant.label, price: variant.price, quantity: state.selectedQty,
     });
-  tg.HapticFeedback?.impactOccurred?.("light");
+  haptic();
   updateCartBar();
   navBack();
   showToast(t("added_to_cart"));
@@ -440,17 +451,58 @@ function cartCount() {
   return state.cart.reduce((sum, l) => sum + l.quantity, 0);
 }
 
+let lastCartCount = 0;
+function bumpEl(elm) { if (!elm) return; elm.classList.remove("bump"); void elm.offsetWidth; elm.classList.add("bump"); }
+function setBadge(elm, count) {
+  if (!elm) return;
+  if (count > 0) { elm.hidden = false; elm.textContent = count; } else elm.hidden = true;
+}
 function updateCartBar() {
   const bar = el("cart-bar");
   const count = cartCount();
-  const badge = el("cart-nav-badge");
-  if (badge) {
-    if (count > 0) { badge.hidden = false; badge.textContent = count; }
-    else badge.hidden = true;
-  }
+  setBadge(el("cart-nav-badge"), count);
+  setBadge(el("header-cart-badge"), count);
+  if (count > lastCartCount) { bumpEl(el("cart-nav-badge")); bumpEl(el("header-cart-badge")); }
+  lastCartCount = count;
+  saveCart();
   if (count === 0) { bar.classList.remove("visible"); return; }
   el("cart-summary").textContent = t("cart_count", { n: count, sum: money(cartTotal()) });
   bar.classList.add("visible");
+}
+
+// Постоянная корзина: сохраняем в CloudStorage, восстанавливаем при запуске.
+function saveCart() {
+  try { tg.CloudStorage?.setItem?.("cart", JSON.stringify(state.cart)); } catch (_) {}
+}
+function loadCart() {
+  return new Promise((resolve) => {
+    const cs = tg.CloudStorage;
+    if (!cs || !cs.getItem) return resolve();
+    try {
+      cs.getItem("cart", (err, val) => {
+        if (!err && val) { try { const arr = JSON.parse(val); if (Array.isArray(arr)) state.cart = arr; } catch (_) {} }
+        resolve();
+      });
+    } catch (_) { resolve(); }
+  });
+}
+// Сверяем сохранённую корзину с каталогом: тихо убираем исчезнувшие позиции и
+// подтягиваем актуальные цены/названия (вдруг товар изменили после сохранения).
+async function validateCart() {
+  if (!state.cart.length) return;
+  if (!state.allProducts) {
+    try { state.allProducts = await apiFetch(`/api/products?location_id=${LOCATION_ID}`, { tg }); }
+    catch (_) { return; }
+  }
+  const byVariant = new Map();
+  for (const p of state.allProducts) for (const v of p.variants) byVariant.set(v.id, { p, v });
+  state.cart = state.cart
+    .filter((l) => byVariant.has(l.variantId))
+    .map((l) => {
+      const { p, v } = byVariant.get(l.variantId);
+      return { ...l, name: p.name, photo: p.photo_url, variantLabel: v.label, price: v.price };
+    });
+  updateCartBar();
 }
 
 el("cart-bar").addEventListener("click", () => { renderCart(); navPush("cart"); });
@@ -484,10 +536,10 @@ function renderCart() {
       btn.addEventListener("click", () => { state.cart.splice(Number(btn.dataset.remove), 1); rerender(); })
     );
     wrap.querySelectorAll("[data-inc]").forEach((btn) =>
-      btn.addEventListener("click", () => { state.cart[Number(btn.dataset.inc)].quantity += 1; tg.HapticFeedback?.selectionChanged?.(); rerender(); })
+      btn.addEventListener("click", () => { state.cart[Number(btn.dataset.inc)].quantity += 1; rerender(); })
     );
     wrap.querySelectorAll("[data-dec]").forEach((btn) =>
-      btn.addEventListener("click", () => { const l = state.cart[Number(btn.dataset.dec)]; l.quantity = Math.max(1, l.quantity - 1); tg.HapticFeedback?.selectionChanged?.(); rerender(); })
+      btn.addEventListener("click", () => { const l = state.cart[Number(btn.dataset.dec)]; l.quantity = Math.max(1, l.quantity - 1); rerender(); })
     );
   }
   renderAddonsInto(el("cart-addons"), t("addons_cart_title"), () => { renderCart(); updateCartBar(); });
@@ -522,9 +574,33 @@ function computeDeliveryFeeClient() {
   return start >= dayEnd ? night : day;
 }
 
+// Текущая дата в Батуми (UTC+4) в формате YYYY-MM-DD — для min у поля даты.
+function batumiToday() {
+  const now = new Date();
+  const b = new Date(now.getTime() + now.getTimezoneOffset() * 60000 + 4 * 3600000);
+  return b.toISOString().slice(0, 10);
+}
+// Часовые интервалы времени доставки: 09:00–10:00 … 23:00–00:00 + «как можно скорее».
+function buildTimeSlots() {
+  const sel = el("f-slot");
+  if (!sel) return;
+  const prev = sel.value;
+  let html = `<option value="">${t("asap")}</option>`;
+  for (let h = 9; h < 24; h++) {
+    const a = String(h).padStart(2, "0") + ":00";
+    const b = String((h + 1) % 24).padStart(2, "0") + ":00";
+    html += `<option value="${a}-${b}">${a}–${b}</option>`;
+  }
+  sel.innerHTML = html;
+  if (prev) sel.value = prev;
+}
+
 function openCheckout() {
   state.fulfillment = "delivery";
   state.zone = "batumi";
+  buildTimeSlots();
+  const dateEl = el("f-date");
+  if (dateEl) dateEl.min = batumiToday();
   syncFulfillmentUi();
   updateCheckoutState();
   navPush("checkout");
@@ -626,7 +702,7 @@ el("checkout-form").addEventListener("submit", async (e) => {
     navReset();
     renderConfirmation(order);
     navPush("confirm");
-    tg.HapticFeedback?.notificationOccurred?.("success");
+    haptic("success");
   } catch (err) {
     const detail = err.data?.detail;
     showToast(detail || (err.data?.error === "unauthorized" ? t("order_auth_err") : t("order_fail")));
@@ -754,7 +830,7 @@ async function repeatOrder(order) {
     navReset();
     renderCart();
     navPush("cart");
-    tg.HapticFeedback?.notificationOccurred?.("success");
+    haptic("success");
     showToast(added === order.items.length ? t("added_to_cart") : t("partial_added"));
   } else {
     if (btn) { btn.disabled = false; btn.textContent = t("repeat_order"); }
@@ -770,18 +846,21 @@ function setActiveTab(tab) {
     b.classList.toggle("active", b.dataset.tab === tab)
   );
 }
+function scrollTop() { window.scrollTo({ top: 0, behavior: "smooth" }); }
 function showCatalog() {
   state.view = "catalog";
   setActiveTab("catalog");
   el("tabs").style.display = "";
   el("grid-title").textContent = t("popular");
   renderProductGrid(state.products);
+  scrollTop();
 }
 async function showFavorites() {
   state.view = "favorites";
   setActiveTab("favorites");
   el("tabs").style.display = "none";
   el("grid-title").textContent = t("favorites");
+  scrollTop();
   if (!state.allProducts) {
     el("product-grid").innerHTML = `<div class="empty-state" style="grid-column:1/-1;">${t("loading")}</div>`;
     try { state.allProducts = await apiFetch(`/api/products?location_id=${LOCATION_ID}`, { tg }); }
@@ -800,26 +879,101 @@ document.querySelectorAll("#bottom-nav .nav-item").forEach((btn) => {
   });
 });
 
-el("profile-avatar").addEventListener("click", () => { renderProfile(); navPush("profile"); });
-el("filter-btn").addEventListener("click", () => showToast(t("filters_soon")));
+el("header-cart").addEventListener("click", () => { renderCart(); navPush("cart"); });
+el("filter-btn").addEventListener("click", openFilters);
+
+// Кнопка «Наверх» — появляется при длинной прокрутке каталога.
+const toTopBtn = el("to-top");
+if (toTopBtn) {
+  toTopBtn.hidden = false;
+  toTopBtn.addEventListener("click", () => window.scrollTo({ top: 0, behavior: "smooth" }));
+  window.addEventListener("scroll", () => {
+    toTopBtn.classList.toggle("show", window.scrollY > 400 && !curSheet());
+  }, { passive: true });
+}
 
 // ---------------------------------------------------------------------
-// Избранное — Telegram CloudStorage
+// Фильтры и сортировка
 // ---------------------------------------------------------------------
-function saveFavorites() {
-  try { tg.CloudStorage?.setItem?.("favorites", JSON.stringify([...state.favorites])); } catch (_) {}
+function fchip(group, value, label, active) {
+  return `<button class="chip ${active ? "active" : ""}" data-fgroup="${group}" data-fval="${value}" type="button">${label}</button>`;
 }
-function loadFavorites() {
-  return new Promise((resolve) => {
-    const cs = tg.CloudStorage;
-    if (!cs || !cs.getItem) return resolve();
-    try {
-      cs.getItem("favorites", (err, val) => {
-        if (!err && val) { try { JSON.parse(val).forEach((id) => state.favorites.add(Number(id))); } catch (_) {} }
-        resolve();
-      });
-    } catch (_) { resolve(); }
+function openFilters() {
+  const f = state.filter;
+  el("filter-content").innerHTML = `
+    <div class="filter-group">
+      <div class="filter-group-title">${t("filter_sort")}</div>
+      <div class="chips">
+        ${fchip("sort", "default", t("sort_default"), f.sort === "default")}
+        ${fchip("sort", "popular", t("sort_popular"), f.sort === "popular")}
+        ${fchip("sort", "price_asc", t("sort_price_asc"), f.sort === "price_asc")}
+        ${fchip("sort", "price_desc", t("sort_price_desc"), f.sort === "price_desc")}
+      </div>
+    </div>
+    <div class="filter-group">
+      <div class="filter-group-title">${t("filter_badge")}</div>
+      <div class="chips">
+        ${fchip("badge", "", t("filter_all"), !f.badge)}
+        ${fchip("badge", "hit", t("badge_hit"), f.badge === "hit")}
+        ${fchip("badge", "new", t("badge_new"), f.badge === "new")}
+        ${fchip("badge", "recommended", t("badge_recommended"), f.badge === "recommended")}
+      </div>
+    </div>
+    <div class="filter-group">
+      <div class="filter-group-title">${t("filter_availability")}</div>
+      <div class="chips">
+        ${fchip("availability", "", t("filter_all"), !f.availability)}
+        ${fchip("availability", "in_stock", t("avail_in_stock"), f.availability === "in_stock")}
+        ${fchip("availability", "made_to_order", t("avail_made"), f.availability === "made_to_order")}
+      </div>
+    </div>
+    <div class="filter-group">
+      <div class="filter-group-title">${t("filter_price")}</div>
+      <div class="filter-price-row">
+        <input type="number" inputmode="numeric" enterkeyhint="done" id="f-price-min" placeholder="${t("price_from")}" value="${f.priceMin ?? ""}" />
+        <span>—</span>
+        <input type="number" inputmode="numeric" enterkeyhint="done" id="f-price-max" placeholder="${t("price_to")}" value="${f.priceMax ?? ""}" />
+      </div>
+    </div>
+    <div class="filter-actions">
+      <button class="btn btn-secondary" id="filter-reset" type="button">${t("reset")}</button>
+      <button class="btn btn-primary" id="filter-apply" type="button">${t("apply")}</button>
+    </div>
+  `;
+  el("filter-content").querySelectorAll(".chip").forEach((c) =>
+    c.addEventListener("click", () => {
+      c.parentElement.querySelectorAll(".chip").forEach((x) => x.classList.remove("active"));
+      c.classList.add("active");
+      state.filter[c.dataset.fgroup] = c.dataset.fval;
+    })
+  );
+  el("filter-content").querySelectorAll("#f-price-min, #f-price-max").forEach((inp) =>
+    inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); blurActive(); } })
+  );
+  el("filter-reset").addEventListener("click", () => {
+    state.filter = { sort: "default", badge: "", availability: "", priceMin: null, priceMax: null };
+    navBack();
+    if (state.view !== "catalog") showCatalog(); else renderProductGrid();
   });
+  el("filter-apply").addEventListener("click", () => {
+    const minV = parseFloat(el("f-price-min").value);
+    const maxV = parseFloat(el("f-price-max").value);
+    state.filter.priceMin = Number.isFinite(minV) ? minV : null;
+    state.filter.priceMax = Number.isFinite(maxV) ? maxV : null;
+    navBack();
+    if (state.view !== "catalog") showCatalog(); else renderProductGrid();
+  });
+  navPush("filter");
+}
+
+// ---------------------------------------------------------------------
+// Избранное/лайки — на сервере (переживает смену устройства)
+// ---------------------------------------------------------------------
+async function loadFavorites() {
+  try {
+    const ids = await apiFetch("/api/favorites", { tg });
+    state.favorites = new Set((ids || []).map(Number));
+  } catch (_) { /* не критично: покажем без отметок */ }
 }
 
 // ---------------------------------------------------------------------
@@ -845,6 +999,21 @@ function loadTheme() {
   });
 }
 
+// Вибрация: тумблер в профиле, хранение в CloudStorage (по умолчанию вкл).
+function setHaptics(on) {
+  state.haptics = !!on;
+  try { tg.CloudStorage?.setItem?.("haptics", on ? "1" : "0"); } catch (_) {}
+}
+function loadHaptics() {
+  return new Promise((resolve) => {
+    const cs = tg.CloudStorage;
+    if (!cs || !cs.getItem) { state.haptics = true; return resolve(); }
+    try {
+      cs.getItem("haptics", (err, val) => { state.haptics = !(!err && val === "0"); resolve(); });
+    } catch (_) { state.haptics = true; resolve(); }
+  });
+}
+
 // ---------------------------------------------------------------------
 // Профиль (заказы, тема, язык, контакты). Валюта — только ₾, без выбора.
 // ---------------------------------------------------------------------
@@ -853,6 +1022,7 @@ function renderProfile() {
   const name = u?.first_name ? `${u.first_name}${u.last_name ? " " + u.last_name : ""}` : t("guest");
   const th = state.theme || "system";
   const lng = state.lang || "ru";
+  const hap = state.haptics !== false;
   const s = state.shop || {};
   const ig = (s.instagram || "").replace(/^@/, "");
   const contactRows = [];
@@ -887,6 +1057,13 @@ function renderProfile() {
             <button class="pm-seg-btn ${lng === "en" ? "active" : ""}" data-lang="en" type="button">English</button>
           </div>
         </div>
+        <div class="pm-block-row">
+          <span>${t("haptics")}</span>
+          <div class="pm-seg" id="pm-haptics">
+            <button class="pm-seg-btn ${hap ? "active" : ""}" data-haptics="on" type="button">${t("on_label")}</button>
+            <button class="pm-seg-btn ${!hap ? "active" : ""}" data-haptics="off" type="button">${t("off_label")}</button>
+          </div>
+        </div>
       </div>
       ${contactRows.length ? `<div class="pm-block"><div class="pm-block-title">${t("contact")}</div>${contactRows.join("")}</div>` : ""}
     </div>
@@ -898,6 +1075,9 @@ function renderProfile() {
   el("profile-content").querySelectorAll("#pm-lang .pm-seg-btn").forEach((b) =>
     b.addEventListener("click", () => { setLanguage(b.dataset.lang); })
   );
+  el("profile-content").querySelectorAll("#pm-haptics .pm-seg-btn").forEach((b) =>
+    b.addEventListener("click", () => { setHaptics(b.dataset.haptics === "on"); renderProfile(); haptic(); })
+  );
 }
 
 // ---------------------------------------------------------------------
@@ -906,12 +1086,16 @@ async function init() {
   try {
     await loadLang();
     await loadTheme();
-    await loadFavorites();
+    await loadHaptics();
+    await loadCart();
     applyDomI18n(document);
     await loadShop();
+    await loadFavorites();
     await loadCategories();
     await loadProducts();
     await loadAddons();
+    await validateCart();
+    updateCartBar();
   } catch (err) {
     el("product-grid").innerHTML = `<div class="empty-state" style="grid-column:1/-1;">${t("catalog_load_err")}</div>`;
     console.error(err);
