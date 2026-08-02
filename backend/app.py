@@ -80,6 +80,17 @@ def bootstrap():
                 _files.append(_f)
         print(f"[db] DB_PATH={DB_PATH} size={_sz}B journal={_jm} products={_pc} categories={_cc} orders={_oc}", flush=True)
         print(f"[db] {_dir} -> {_files}", flush=True)
+        # Тест сырой персистентности Volume, без SQLite: дописываем метку старта
+        # в файл на /data и считаем строки. Если Volume реально хранит данные —
+        # число строк растёт от деплоя к деплою. Если всегда 1 — /data эфемерен.
+        _marker = os.path.join(_dir, "persist_test.txt")
+        with open(_marker, "a", encoding="utf-8") as _mf:
+            _mf.write(f"boot {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            _mf.flush()
+            os.fsync(_mf.fileno())
+        with open(_marker, "r", encoding="utf-8") as _mf:
+            _lines = _mf.read().splitlines()
+        print(f"[db] persist_test lines={len(_lines)} last={_lines[-2:]}", flush=True)
     except Exception as _e:
         print(f"[db] diag failed: {_e}", flush=True)
     if not conn.execute("SELECT 1 FROM locations LIMIT 1").fetchone():
