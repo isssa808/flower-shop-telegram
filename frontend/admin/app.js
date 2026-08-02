@@ -142,13 +142,14 @@ function openOrderDetail(orderId) {
     <h2>Заказ №${o.id}</h2>
     <div class="order-meta" style="margin-bottom:14px;">
       <strong>${o.customer_name}</strong><br/>${o.customer_phone}<br/><br/>
-      ${o.fulfillment_type === "delivery" ? `Доставка на: ${o.address}<br/>${o.delivery_date} ${o.delivery_slot}` : "Самовывоз"}<br/>
+      ${o.fulfillment_type === "delivery" ? `Доставка на: ${o.address}<br/>${o.delivery_date || ""} ${o.delivery_slot || ""}${o.delivery_zone ? `<br/>Зона: ${o.delivery_zone === "batumi" ? "по Батуми" : o.delivery_zone}` : ""}` : "Самовывоз"}<br/>
       ${o.recipient_name ? `Получатель: ${o.recipient_name}<br/>` : ""}
       ${o.card_message ? `Открытка: «${o.card_message}»<br/>` : ""}
       ${o.photo_before_delivery ? "📷 Прислать фото перед доставкой<br/>" : ""}
       Оплата: ${o.payment_method}
     </div>
     ${o.items.map((i) => `<div class="cart-line"><div class="cl-info"><div class="cl-name">${i.product_name}</div><div class="cl-variant">${i.variant_label} ×${i.quantity}</div></div><div class="cl-price">${money(i.price * i.quantity)}</div></div>`).join("")}
+    ${o.delivery_fee ? `<div class="cart-line"><div class="cl-info"><div class="cl-name">Доставка</div></div><div class="cl-price">${money(o.delivery_fee)}</div></div>` : ""}
     <div class="cart-total"><span>Итого</span><span>${money(o.total)}</span></div>
   `;
   openSheet("order-detail");
@@ -213,6 +214,10 @@ function openProductEdit(productId) {
         </select>
       </div>
       <div class="field"><label>Повод (через запятую)</label><input name="occasion_tags" value="${(p?.occasion_tags || []).join(", ")}"/></div>
+      <label class="checkbox-row" style="margin:2px 0 14px;">
+        <input type="checkbox" name="is_addon" ${p?.is_addon ? "checked" : ""}/>
+        <span>Показывать как доп-товар («Добавьте к заказу»)</span>
+      </label>
       <div class="field"><label>Фото</label><input type="file" name="photo" accept="image/*"/></div>
       <div class="field">
         <label>Варианты (размер и цена)</label>
@@ -258,6 +263,7 @@ function openProductEdit(productId) {
       composition: fd.get("composition"),
       status: fd.get("status"),
       occasion_tags: fd.get("occasion_tags").split(",").map((s) => s.trim()).filter(Boolean),
+      is_addon: fd.get("is_addon") ? 1 : 0,
       variants: variantRows,
     };
 
@@ -603,23 +609,49 @@ async function loadSettings() {
   state.settings = await apiFetch("/api/admin/settings", { tg });
 }
 
+const esc = (v) => String(v == null ? "" : v).replace(/"/g, "&quot;");
+
 function renderSettings() {
   const s = state.settings || {};
   const usingEnv = !s.staff_chat_id && s.staff_chat_id_effective;
   el("settings-form-wrap").innerHTML = `
     <div class="card" style="padding:14px;">
       <form id="settings-form">
+        <h3 class="settings-group">Магазин</h3>
+        <div class="field"><label>Название магазина</label><input name="shop_name" value="${esc(s.shop_name)}"/></div>
+        <div class="field"><label>Адрес / точка</label><input name="shop_address" value="${esc(s.shop_address)}"/></div>
+
+        <h3 class="settings-group">Доставка</h3>
+        <div class="field-row">
+          <div class="field"><label>Мин. сумма для доставки, ₾</label><input name="min_delivery_amount" type="number" step="1" value="${esc(s.min_delivery_amount)}"/></div>
+          <div class="field"><label>Время смены тарифа</label><input name="delivery_day_end" value="${esc(s.delivery_day_end)}" placeholder="22:00"/></div>
+        </div>
+        <div class="field-row">
+          <div class="field"><label>Дневной тариф, ₾</label><input name="delivery_fee_day" type="number" step="1" value="${esc(s.delivery_fee_day)}"/></div>
+          <div class="field"><label>Ночной тариф, ₾</label><input name="delivery_fee_night" type="number" step="1" value="${esc(s.delivery_fee_night)}"/></div>
+        </div>
+        <div class="cr-meta" style="margin:-4px 0 10px;">Заказ меньше мин. суммы — только самовывоз. Дневной тариф — до «времени смены», ночной — после (приём до 00:00). Доставка только по Батуми.</div>
+
+        <h3 class="settings-group">Контакты</h3>
+        <div class="field"><label>Телефон</label><input name="shop_phone" value="${esc(s.shop_phone)}" placeholder="+995 5xx xx xx xx"/></div>
+        <div class="field"><label>Instagram (ник без @)</label><input name="shop_instagram" value="${esc(s.shop_instagram)}" placeholder="flowers_batum_flower"/></div>
+
+        <h3 class="settings-group">Тексты витрины</h3>
+        <div class="field"><label>Экспресс-доставка (срок)</label><input name="express_delivery_text" value="${esc(s.express_delivery_text)}" placeholder="в течение часа"/></div>
+        <div class="field"><label>Сноска про живые цветы</label><textarea name="disclaimer_note" rows="3">${esc(s.disclaimer_note)}</textarea></div>
+        <div class="field"><label>Раздел «Доставка и оплата»</label><textarea name="delivery_payment_info" rows="3">${esc(s.delivery_payment_info)}</textarea></div>
+
+        <h3 class="settings-group">Уведомления</h3>
         <div class="field">
           <label>Chat ID для уведомлений о заказах</label>
-          <input name="staff_chat_id" value="${s.staff_chat_id || ""}" placeholder="напр. -1001234567890 (группа) или ваш ID"/>
+          <input name="staff_chat_id" value="${esc(s.staff_chat_id)}" placeholder="напр. -1001234567890 (группа) или ваш ID"/>
           <div class="cr-meta" style="margin-top:6px;">
             ${usingEnv
-              ? `Сейчас используется значение по умолчанию: <b>${s.staff_chat_id_effective}</b>. Оставьте пустым, чтобы не менять.`
+              ? `Сейчас используется значение по умолчанию: <b>${esc(s.staff_chat_id_effective)}</b>. Оставьте пустым, чтобы не менять.`
               : "Куда бот шлёт новые заказы. Для группы добавьте бота в неё и укажите её ID (начинается с −100)."}
           </div>
         </div>
-        <div class="field"><label>Название магазина</label><input name="shop_name" value="${s.shop_name || ""}"/></div>
-        <div class="field"><label>Адрес / точка</label><input name="shop_address" value="${s.shop_address || ""}"/></div>
+
         <div class="form-actions">
           <button type="submit" class="btn btn-primary btn-block">Сохранить настройки</button>
         </div>
@@ -636,6 +668,15 @@ function renderSettings() {
           staff_chat_id: fd.get("staff_chat_id"),
           shop_name: fd.get("shop_name"),
           shop_address: fd.get("shop_address"),
+          min_delivery_amount: fd.get("min_delivery_amount"),
+          delivery_fee_day: fd.get("delivery_fee_day"),
+          delivery_fee_night: fd.get("delivery_fee_night"),
+          delivery_day_end: fd.get("delivery_day_end"),
+          shop_phone: fd.get("shop_phone"),
+          shop_instagram: fd.get("shop_instagram"),
+          express_delivery_text: fd.get("express_delivery_text"),
+          disclaimer_note: fd.get("disclaimer_note"),
+          delivery_payment_info: fd.get("delivery_payment_info"),
         },
         tg,
       });

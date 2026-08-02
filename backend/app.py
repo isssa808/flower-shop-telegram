@@ -61,6 +61,15 @@ def _too_large(_e):
 # через @userinfobot), прописали его в OWNER_TELEGRAM_ID на хостинге,
 # перезапустили — и вы уже сотрудник с ролью owner.
 # --------------------------------------------------------------------------
+def _add_column_if_missing(conn, table, column, decl):
+    """Идемпотентный ALTER TABLE ADD COLUMN (SQLite не умеет IF NOT EXISTS для колонок)."""
+    cols = [r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+        conn.commit()
+        print(f"[db] migrate: {table}.{column} added", flush=True)
+
+
 def bootstrap():
     conn = get_db()
     # Короткий диагностический лог при старте: путь к БД и число строк. Помогает
@@ -72,6 +81,21 @@ def bootstrap():
         print(f"[db] DB_PATH={DB_PATH} products={_pc} orders={_oc}", flush=True)
     except Exception as _e:
         print(f"[db] diag failed: {_e}", flush=True)
+
+    # Миграции для уже задеплоенной БД: добавляем новые колонки, если их ещё нет
+    # (CREATE TABLE IF NOT EXISTS не меняет существующие таблицы). Идемпотентно.
+    _add_column_if_missing(conn, "products", "is_addon", "INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing(conn, "orders", "delivery_zone", "TEXT")
+    _add_column_if_missing(conn, "orders", "delivery_fee", "REAL NOT NULL DEFAULT 0")
+
+    # Разовая зачистка файла-метки, оставшегося после диагностики персистентности.
+    try:
+        _pt = os.path.join(os.path.dirname(DB_PATH) or ".", "persist_test.txt")
+        if os.path.exists(_pt):
+            os.remove(_pt)
+    except OSError:
+        pass
+
     if not conn.execute("SELECT 1 FROM locations LIMIT 1").fetchone():
         conn.execute(
             "INSERT INTO locations (id, name, address) VALUES (1, ?, ?)",
@@ -132,16 +156,16 @@ def seed_demo_catalog(conn):
     # id категорий совпадают с порядком вставки в bootstrap (bouquets=1, weddings=2, balloons=3, wrapping=4)
     conn.executemany(
         "INSERT INTO products (id, location_id, category_id, name, description, composition, "
-        "photo_url, status, occasion_tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "photo_url, status, occasion_tags, is_addon) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (1, 1, 1, "Букет «Батуми»", "Розы Netherlands, эвкалипт, авторская сборка",
-             "11 роз, эвкалипт", PLACEHOLDER_PHOTO, "in_stock", "романтика,день рождения"),
+             "11 роз, эвкалипт", PLACEHOLDER_PHOTO, "in_stock", "романтика,день рождения", 0),
             (2, 1, 1, "Букет «Бульвар»", "Тюльпаны микс с гипсофилой",
-             "15 тюльпанов, гипсофила", PLACEHOLDER_PHOTO, "in_stock", "весна,просто так"),
+             "15 тюльпанов, гипсофила", PLACEHOLDER_PHOTO, "in_stock", "весна,просто так", 0),
             (3, 1, 2, "Свадебный букет невесты", "Под цвет и стиль мероприятия, обсуждается индивидуально",
-             "розы, эвкалипт, лента", PLACEHOLDER_PHOTO, "made_to_order", "свадьба"),
+             "розы, эвкалипт, лента", PLACEHOLDER_PHOTO, "made_to_order", "свадьба", 0),
             (4, 1, 3, "Шар фольгированный «Сердце»", "Гелиевый шар, 45 см",
-             "1 шар", PLACEHOLDER_PHOTO, "in_stock", "день рождения,романтика"),
+             "1 шар", PLACEHOLDER_PHOTO, "in_stock", "день рождения,романтика", 1),
         ],
     )
     conn.executemany(
@@ -375,6 +399,63 @@ def resolve_staff_chat_id():
     return (get_setting("staff_chat_id") or "").strip() or STAFF_CHAT_ID
 
 
+# --------------------------------------------------------------------------
+# Доставка и тексты витрины. Значения — в app_settings (редактируются в
+# админке), здесь дефолты. Доставка только по Батуми; тариф зависит от времени.
+# --------------------------------------------------------------------------
+SHOP_DEFAULTS = {
+    "min_delivery_amount": "100",
+    "delivery_fee_day": "15",
+    "delivery_fee_night": "30",
+    "delivery_day_end": "22:00",   # после этого времени — ночной тариф (приём до 00:00)
+    "shop_phone": "",
+    "shop_instagram": "flowers_batum_flower",
+    "express_delivery_text": "в течение часа",
+    "delivery_payment_info": (
+        "Доставка по Батуми при заказе от 100 ₾: 15 ₾ до 22:00, 30 ₾ с 22:00 до 00:00. "
+        "За пределы Батуми — по договорённости, напишите нам напрямую. "
+        "Оплата: наличными, картой курьеру или переводом."
+    ),
+    "disclaimer_note": (
+        "Обратите внимание: цветы живые, поэтому композиция может немного отличаться от фото "
+        "по оттенку, форме и наполнению — но она будет не менее красивой."
+    ),
+}
+
+
+def get_setting_or_default(key):
+    val = get_setting(key)
+    if val is None or val == "":
+        return SHOP_DEFAULTS.get(key, "")
+    return val
+
+
+def _parse_hhmm(s):
+    try:
+        h, m = str(s).split(":")
+        return int(h) * 60 + int(m)
+    except (ValueError, AttributeError):
+        return None
+
+
+def _num_setting(key):
+    try:
+        return float(get_setting_or_default(key))
+    except (ValueError, TypeError):
+        return float(SHOP_DEFAULTS.get(key, 0) or 0)
+
+
+def compute_delivery_fee(slot):
+    """Тариф доставки по времени: дневной до delivery_day_end, иначе ночной.
+    Для «как можно скорее» (пустой слот) — по текущему времени Батуми (UTC+4)."""
+    day_end = _parse_hhmm(get_setting_or_default("delivery_day_end")) or (22 * 60)
+    start = _parse_hhmm(slot.split("-")[0].strip()) if slot else None
+    if start is None:
+        now = time.gmtime(time.time() + 4 * 3600)  # Батуми = UTC+4, без перехода на летнее время
+        start = now.tm_hour * 60 + now.tm_min
+    return _num_setting("delivery_fee_night") if start >= day_end else _num_setting("delivery_fee_day")
+
+
 # Простая транслитерация для slug категории (имена — на русском). Slug виден
 # только в параметрах API (?category=...), не показывается покупателю.
 _TRANSLIT = {
@@ -465,6 +546,29 @@ def api_locations():
     return jsonify(rows)
 
 
+@app.route("/api/shop")
+def api_shop():
+    """Публичные данные магазина для витрины: контакты, правила доставки, тексты."""
+    conn = get_db()
+    loc = conn.execute("SELECT name, address FROM locations WHERE id=1").fetchone()
+    conn.close()
+    return jsonify({
+        "name": (loc["name"] if loc else "") or "Flowers Batum Flower",
+        "address": (loc["address"] if loc else "") or "",
+        "phone": get_setting_or_default("shop_phone"),
+        "instagram": get_setting_or_default("shop_instagram"),
+        "min_delivery_amount": _num_setting("min_delivery_amount"),
+        "delivery_fee_day": _num_setting("delivery_fee_day"),
+        "delivery_fee_night": _num_setting("delivery_fee_night"),
+        "delivery_day_end": get_setting_or_default("delivery_day_end"),
+        # Тексты — «сырые» (пусто, если владелец не задал): витрина подставит
+        # встроенный перевод EN/RU, а заданный владельцем текст перекроет его.
+        "express_delivery_text": get_setting("express_delivery_text", ""),
+        "delivery_payment_info": get_setting("delivery_payment_info", ""),
+        "disclaimer_note": get_setting("disclaimer_note", ""),
+    })
+
+
 @app.route("/api/categories")
 def api_categories():
     location_id = request.args.get("location_id", 1)
@@ -492,9 +596,12 @@ def api_products():
     category = request.args.get("category")
     search = request.args.get("search")
     occasion = request.args.get("occasion")
+    addon = request.args.get("addon")
 
     query = "SELECT * FROM products WHERE location_id = ? AND status != 'hidden'"
     params = [location_id]
+    if addon == "1":
+        query += " AND is_addon = 1"
     if category:
         query += " AND category_id = (SELECT id FROM categories WHERE slug = ?)"
         params.append(category)
@@ -538,10 +645,17 @@ def api_create_order():
     if not items:
         return jsonify({"error": "empty order"}), 400
 
+    user = g.tg_user or {}
+    customer_name = (body.get("customer_name") or user.get("first_name", "") or "").strip()
+    customer_phone = (body.get("customer_phone") or "").strip()
+    if not customer_name or not customer_phone:
+        return jsonify({"error": "name and phone required",
+                        "detail": "Укажите имя и телефон"}), 400
+
     conn = get_db()
     cur = conn.cursor()
 
-    total = 0
+    items_total = 0
     resolved_items = []
     for it in items:
         variant = cur.execute(
@@ -553,29 +667,52 @@ def api_create_order():
             conn.close()
             return jsonify({"error": f"variant {it['variant_id']} not found"}), 400
         qty = int(it.get("quantity", 1))
-        total += variant["price"] * qty
+        items_total += variant["price"] * qty
         resolved_items.append((variant["product_id"], variant["name"], variant["label"], variant["price"], qty))
 
-    user = g.tg_user or {}
+    # --- Правила доставки (только по Батуми, порог + тариф по времени) ---
+    fulfillment = body.get("fulfillment_type", "delivery")
+    delivery_zone = None
+    delivery_fee = 0
+    slot = body.get("delivery_slot", "") or ""
+    if fulfillment == "delivery":
+        zone = (body.get("delivery_zone") or "batumi").strip()
+        if zone != "batumi":
+            conn.close()
+            return jsonify({"error": "delivery zone not served",
+                            "detail": "Доставка через приложение — только по Батуми. За город напишите нам напрямую или выберите самовывоз."}), 400
+        min_amount = _num_setting("min_delivery_amount")
+        if items_total < min_amount:
+            conn.close()
+            return jsonify({"error": "below min delivery amount", "min": min_amount,
+                            "detail": f"Доставка от {int(min_amount)} ₾. Добавьте товаров или оформите самовывоз."}), 400
+        delivery_zone = "batumi"
+        delivery_fee = compute_delivery_fee(slot)
+
+    total = items_total + delivery_fee
+
     cur.execute(
         """INSERT INTO orders (location_id, customer_tg_id, customer_name, customer_phone,
            fulfillment_type, address, delivery_date, delivery_slot, recipient_name,
-           recipient_phone, card_message, photo_before_delivery, payment_method, total)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           recipient_phone, card_message, photo_before_delivery, payment_method,
+           delivery_zone, delivery_fee, total)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             body.get("location_id", 1),
             str(user.get("id", "")),
-            body.get("customer_name") or user.get("first_name", ""),
-            body.get("customer_phone", ""),
-            body.get("fulfillment_type", "delivery"),
-            body.get("address", ""),
+            customer_name,
+            customer_phone,
+            fulfillment,
+            body.get("address", "") if fulfillment == "delivery" else "",
             body.get("delivery_date", ""),
-            body.get("delivery_slot", ""),
+            slot,
             body.get("recipient_name", ""),
             body.get("recipient_phone", ""),
             body.get("card_message", ""),
             1 if body.get("photo_before_delivery") else 0,
             body.get("payment_method", "cash"),
+            delivery_zone,
+            delivery_fee,
             total,
         ),
     )
@@ -607,8 +744,14 @@ def api_create_order():
     conn.commit()
     conn.close()
 
-    notify_telegram(resolve_staff_chat_id(), f"🌸 Новый заказ #{order_id} на {total} — {body.get('customer_name', '')}")
-    return jsonify({"id": order_id, "total": total, "status": "new"}), 201
+    ful_ru = "Доставка (Батуми)" if fulfillment == "delivery" else "Самовывоз"
+    fee_note = f", доставка {int(delivery_fee)} ₾" if delivery_fee else ""
+    notify_telegram(
+        resolve_staff_chat_id(),
+        f"🌸 Новый заказ #{order_id} на {int(total)} ₾ ({ful_ru}{fee_note}) — {customer_name}, {customer_phone}",
+    )
+    return jsonify({"id": order_id, "total": total, "delivery_fee": delivery_fee,
+                    "items_total": items_total, "status": "new"}), 201
 
 
 @app.route("/api/orders/mine")
@@ -662,12 +805,13 @@ def api_admin_products():
         body = request.get_json(force=True)
         cur = conn.execute(
             "INSERT INTO products (location_id, category_id, name, description, composition, "
-            "photo_url, status, occasion_tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "photo_url, status, occasion_tags, is_addon) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 body["location_id"], body["category_id"], body["name"],
                 body.get("description", ""), body.get("composition", ""),
                 body.get("photo_url", "/static/img/placeholder.svg"),
                 body.get("status", "in_stock"), ",".join(body.get("occasion_tags", [])),
+                1 if body.get("is_addon") else 0,
             ),
         )
         product_id = cur.lastrowid
@@ -704,11 +848,12 @@ def api_admin_product_edit(product_id):
     body = request.get_json(force=True)
     conn.execute(
         "UPDATE products SET name=?, description=?, composition=?, status=?, "
-        "occasion_tags=?, photo_url=? WHERE id=?",
+        "occasion_tags=?, photo_url=?, is_addon=? WHERE id=?",
         (
             body.get("name"), body.get("description", ""), body.get("composition", ""),
             body.get("status", "in_stock"), ",".join(body.get("occasion_tags", [])),
-            body.get("photo_url", "/static/img/placeholder.svg"), product_id,
+            body.get("photo_url", "/static/img/placeholder.svg"),
+            1 if body.get("is_addon") else 0, product_id,
         ),
     )
     if "variants" in body:
@@ -968,6 +1113,15 @@ def api_admin_staff_edit(staff_id):
 # Админ API — настройки магазина (только владелец): чат для уведомлений о
 # заказах, название и адрес точки. Хранятся в app_settings.
 # --------------------------------------------------------------------------
+# Настройки-строки, которые владелец редактирует в админке (кроме staff_chat_id,
+# который обрабатывается отдельно, и name/address — они в таблице locations).
+EDITABLE_SETTINGS = [
+    "min_delivery_amount", "delivery_fee_day", "delivery_fee_night", "delivery_day_end",
+    "shop_phone", "shop_instagram", "express_delivery_text", "delivery_payment_info",
+    "disclaimer_note",
+]
+
+
 @app.route("/api/admin/settings", methods=["GET", "PUT"])
 @require_owner
 def api_admin_settings():
@@ -975,6 +1129,9 @@ def api_admin_settings():
         body = request.get_json(force=True)
         if "staff_chat_id" in body:
             set_setting("staff_chat_id", (str(body.get("staff_chat_id") or "")).strip())
+        for key in EDITABLE_SETTINGS:
+            if key in body:
+                set_setting(key, (str(body.get(key) if body.get(key) is not None else "")).strip())
         if "shop_name" in body or "shop_address" in body:
             conn = get_db()
             conn.execute(
@@ -990,13 +1147,16 @@ def api_admin_settings():
     conn = get_db()
     loc = conn.execute("SELECT name, address FROM locations WHERE id=1").fetchone()
     conn.close()
-    return jsonify({
+    result = {
         "staff_chat_id": get_setting("staff_chat_id", ""),
         "staff_chat_id_effective": resolve_staff_chat_id() or "",
         "staff_chat_id_env": STAFF_CHAT_ID or "",
         "shop_name": loc["name"] if loc else "",
         "shop_address": (loc["address"] if loc else "") or "",
-    })
+    }
+    for key in EDITABLE_SETTINGS:
+        result[key] = get_setting_or_default(key)
+    return jsonify(result)
 
 
 # --------------------------------------------------------------------------

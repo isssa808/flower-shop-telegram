@@ -15,7 +15,7 @@
         <img class="shop-logo" src="/shared/img/logo.png" alt="Flowers Batum Flower" />
         <div class="brand">
           <span class="brand-name">Flowers Batum Flower</span>
-          <span class="brand-loc"><span class="dot"></span> Батуми · доставка сегодня</span>
+          <span class="brand-loc"><span class="dot"></span> <span data-i18n="brand_loc">Батуми · доставка сегодня</span></span>
         </div>
       </div>
       <button class="avatar-btn" id="profile-avatar" type="button" aria-label="Профиль">
@@ -25,48 +25,48 @@
 
     <div class="search-wrap">
       <svg class="search-ic" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg>
-      <input type="search" id="search-input" placeholder="Искать букет, повод, цветок…" />
+      <input type="search" id="search-input" data-i18n-placeholder="search_ph" placeholder="Искать букет, повод, цветок…" />
     </div>
 
     <nav class="tabs" id="tabs"><!-- категории рендерятся из JS --></nav>
 
     <div class="sec-head">
-      <h2 id="grid-title">Популярное</h2>
+      <h2 id="grid-title" data-i18n="popular">Популярное</h2>
       <button class="filter-btn" id="filter-btn" type="button">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 5h18M6 12h12M10 19h4"/></svg>
-        Фильтры
+        <span data-i18n="filters">Фильтры</span>
       </button>
     </div>
 
     <main class="product-grid" id="product-grid">
-      <div class="empty-state" style="grid-column:1/-1;">Загружаем каталог…</div>
+      <div class="empty-state" style="grid-column:1/-1;" data-i18n="loading_catalog">Загружаем каталог…</div>
     </main>
   </div>
 
   <!-- Плавающая панель корзины (над нижним меню) -->
   <div class="cart-bar" id="cart-bar">
     <span id="cart-summary">Корзина пуста</span>
-    <span class="cart-arrow">Оформить →</span>
+    <span class="cart-arrow" data-i18n="checkout_arrow">Оформить →</span>
   </div>
 
   <!-- Нижнее меню -->
   <nav class="bottom-nav" id="bottom-nav">
     <button class="nav-item active" data-tab="catalog" type="button">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/></svg>
-      <span>Каталог</span>
+      <span data-i18n="nav_catalog">Каталог</span>
     </button>
     <button class="nav-item" data-tab="favorites" type="button">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 21C12 21 4 14.5 4 8.8C4 5.9 6.2 4 8.6 4C10.2 4 11.4 4.9 12 6C12.6 4.9 13.8 4 15.4 4C17.8 4 20 5.9 20 8.8C20 14.5 12 21 12 21Z"/></svg>
-      <span>Избранное</span>
+      <span data-i18n="nav_favorites">Избранное</span>
     </button>
     <button class="nav-item" data-tab="cart" type="button">
       <span class="nav-badge" id="cart-nav-badge" hidden>0</span>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16l-1.5 11.5a2 2 0 0 1-2 1.7H7.5a2 2 0 0 1-2-1.7L4 6z"/><path d="M9 6a3 3 0 0 1 6 0"/></svg>
-      <span>Корзина</span>
+      <span data-i18n="nav_cart">Корзина</span>
     </button>
     <button class="nav-item" data-tab="profile" type="button">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 5-5 8-5s6.5 1 8 5"/></svg>
-      <span>Профиль</span>
+      <span data-i18n="nav_profile">Профиль</span>
     </button>
   </nav>
 
@@ -81,81 +81,93 @@
   <div class="sheet-backdrop" id="cart-backdrop" data-close="cart"></div>
   <div class="sheet" id="cart-sheet">
     <div class="sheet-handle"></div>
-    <h2>Корзина</h2>
+    <h2 data-i18n="cart_title">Корзина</h2>
     <div id="cart-items"></div>
+    <div id="cart-addons"></div>
     <div class="cart-total" id="cart-total"></div>
-    <button class="btn btn-primary btn-block" id="to-checkout-btn" style="margin-top:14px;">Оформить заказ</button>
+    <button class="btn btn-primary btn-block" id="to-checkout-btn" style="margin-top:14px;" data-i18n="place_order">Оформить заказ</button>
   </div>
 
   <!-- Оформление заказа -->
   <div class="sheet-backdrop" id="checkout-backdrop" data-close="checkout"></div>
   <div class="sheet" id="checkout-sheet">
     <div class="sheet-handle"></div>
-    <h2>Оформление заказа</h2>
+    <h2 data-i18n="checkout_title">Оформление заказа</h2>
     <form id="checkout-form">
       <div class="segmented" id="fulfillment-toggle">
-        <button type="button" class="segmented-btn active" data-value="delivery">Доставка</button>
-        <button type="button" class="segmented-btn" data-value="pickup">Самовывоз</button>
+        <button type="button" class="segmented-btn active" data-value="delivery" data-i18n="delivery">Доставка</button>
+        <button type="button" class="segmented-btn" data-value="pickup" data-i18n="pickup">Самовывоз</button>
       </div>
+      <div id="delivery-min-note" class="checkout-note" style="display:none;"></div>
 
       <div id="delivery-fields">
         <div class="field">
-          <label for="f-address">Адрес доставки</label>
-          <input id="f-address" name="address" placeholder="Улица, дом, квартира" required />
+          <label data-i18n="zone_label">Куда доставка</label>
+          <div class="segmented" id="zone-toggle">
+            <button type="button" class="segmented-btn active" data-value="batumi" data-i18n="zone_batumi">По Батуми</button>
+            <button type="button" class="segmented-btn" data-value="outside" data-i18n="zone_outside">За пределами Батуми</button>
+          </div>
+          <div id="zone-outside-note" class="checkout-note warn" style="display:none;" data-i18n="zone_outside_note"></div>
+        </div>
+        <div class="field">
+          <label for="f-address" data-i18n="address_label">Адрес доставки</label>
+          <input id="f-address" name="address" enterkeyhint="done" data-i18n-placeholder="address_ph" placeholder="Улица, дом, квартира" />
         </div>
         <div class="field-row">
           <div class="field">
-            <label for="f-date">Дата</label>
-            <input id="f-date" name="delivery_date" type="date" required />
+            <label for="f-date" data-i18n="date_label">Дата</label>
+            <input id="f-date" name="delivery_date" type="date" />
           </div>
           <div class="field">
-            <label for="f-slot">Время</label>
+            <label for="f-slot" data-i18n="time_label">Время</label>
             <select id="f-slot" name="delivery_slot">
-              <option value="">Как можно скорее</option>
+              <option value="" data-i18n="asap">Как можно скорее</option>
               <option value="10:00-12:00">10:00–12:00</option>
               <option value="12:00-14:00">12:00–14:00</option>
               <option value="14:00-16:00">14:00–16:00</option>
               <option value="16:00-18:00">16:00–18:00</option>
               <option value="18:00-20:00">18:00–20:00</option>
+              <option value="20:00-22:00">20:00–22:00</option>
+              <option value="22:00-00:00">22:00–00:00</option>
             </select>
           </div>
         </div>
       </div>
 
       <div class="field">
-        <label for="f-name">Ваше имя</label>
-        <input id="f-name" name="customer_name" required />
+        <label for="f-name" data-i18n="your_name">Ваше имя</label>
+        <input id="f-name" name="customer_name" enterkeyhint="done" required />
       </div>
       <div class="field">
-        <label for="f-phone">Ваш телефон</label>
-        <input id="f-phone" name="customer_phone" type="tel" placeholder="+995 5xx xx xx xx" required />
+        <label for="f-phone" data-i18n="your_phone">Ваш телефон</label>
+        <input id="f-phone" name="customer_phone" type="tel" enterkeyhint="done" placeholder="+995 5xx xx xx xx" required />
       </div>
 
       <div class="field">
-        <label for="f-recipient">Получатель (если это подарок)</label>
-        <input id="f-recipient" name="recipient_name" placeholder="Оставьте пустым, если получаете сами" />
+        <label for="f-recipient" data-i18n="recipient_label">Получатель (если это подарок)</label>
+        <input id="f-recipient" name="recipient_name" enterkeyhint="done" data-i18n-placeholder="recipient_ph" placeholder="Оставьте пустым, если получаете сами" />
       </div>
       <div class="field">
-        <label for="f-card">Текст открытки</label>
-        <textarea id="f-card" name="card_message" rows="2" placeholder="Например: «С днём рождения!»"></textarea>
+        <label for="f-card" data-i18n="card_label">Текст открытки</label>
+        <textarea id="f-card" name="card_message" rows="2" data-i18n-placeholder="card_ph" placeholder="Например: «С днём рождения!»"></textarea>
       </div>
 
       <label class="checkbox-row">
         <input type="checkbox" id="f-photo" name="photo_before_delivery" />
-        Прислать фото букета перед доставкой
+        <span data-i18n="photo_before">Прислать фото букета перед доставкой</span>
       </label>
 
       <div class="field">
-        <label>Способ оплаты</label>
+        <label data-i18n="payment_method">Способ оплаты</label>
         <div class="segmented" id="payment-toggle">
-          <button type="button" class="segmented-btn active" data-value="cash">Наличные</button>
-          <button type="button" class="segmented-btn" data-value="card_courier">Карта курьеру</button>
-          <button type="button" class="segmented-btn" data-value="transfer">Перевод</button>
+          <button type="button" class="segmented-btn active" data-value="cash" data-i18n="pay_cash">Наличные</button>
+          <button type="button" class="segmented-btn" data-value="card_courier" data-i18n="pay_card">Карта курьеру</button>
+          <button type="button" class="segmented-btn" data-value="transfer" data-i18n="pay_transfer">Перевод</button>
         </div>
       </div>
 
       <div class="checkout-total" id="checkout-total"></div>
-      <button type="submit" class="btn btn-primary btn-block" id="submit-order-btn">Подтвердить заказ</button>
+      <button type="submit" class="btn btn-primary btn-block" id="submit-order-btn" data-i18n="confirm_order">Подтвердить заказ</button>
     </form>
   </div>
 
@@ -177,7 +189,7 @@
   <div class="sheet-backdrop" id="orders-backdrop" data-close="orders"></div>
   <div class="sheet" id="orders-sheet">
     <div class="sheet-handle"></div>
-    <h2>Мои заказы</h2>
+    <h2 data-i18n="my_orders">Мои заказы</h2>
     <div id="orders-list"></div>
   </div>
 

@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS products (
     photo_url TEXT,
     status TEXT NOT NULL DEFAULT 'in_stock',   -- in_stock | made_to_order | hidden
     occasion_tags TEXT,                          -- через запятую
+    is_addon INTEGER NOT NULL DEFAULT 0,         -- 1 = показывать в «Добавьте к заказу»
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -102,7 +103,9 @@ CREATE TABLE IF NOT EXISTS orders (
     payment_status TEXT DEFAULT 'unpaid',
     status TEXT NOT NULL DEFAULT 'new',              -- new|confirmed|assembling|out_for_delivery|delivered|cancelled
     assigned_staff_id INTEGER REFERENCES staff(id),
-    total REAL NOT NULL DEFAULT 0,
+    delivery_zone TEXT,                             -- batumi | outside (доставка только по Батуми)
+    delivery_fee REAL NOT NULL DEFAULT 0,
+    total REAL NOT NULL DEFAULT 0,                   -- товары + доставка
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 

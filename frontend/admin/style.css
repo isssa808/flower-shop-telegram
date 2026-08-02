@@ -60,3 +60,7 @@
 .form-actions .btn { flex: 1; }
 .variant-editor-row { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
 .variant-editor-row input { flex: 1; }
+.checkbox-row { display: flex; align-items: center; gap: 10px; font-size: 13.5px; color: var(--ink); cursor: pointer; }
+.checkbox-row input { width: 18px; height: 18px; flex: none; }
+.settings-group { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-muted); margin: 20px 0 10px; padding-top: 14px; border-top: 1px solid var(--border); }
+.settings-group:first-child { margin-top: 0; padding-top: 0; border-top: none; }

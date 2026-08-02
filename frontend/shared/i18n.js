@@ -1,0 +1,278 @@
+// Мультиязычность витрины: русский и английский. Владелец пишет контент
+// (названия/описания товаров) на своём языке — переводится только интерфейс.
+// Тексты магазина (сноска, «доставка и оплата», экспресс) редактируются в
+// админке; если владелец их не задал, показываем встроенный перевод отсюда.
+
+const STRINGS = {
+  ru: {
+    brand_loc: "Батуми · доставка сегодня",
+    search_ph: "Искать букет, повод, цветок…",
+    popular: "Популярное",
+    favorites: "Избранное",
+    filters: "Фильтры",
+    filters_soon: "Фильтры добавим на следующем этапе",
+    loading_catalog: "Загружаем каталог…",
+    loading: "Загружаем…",
+    catalog_load_err: "Не удалось загрузить каталог. Проверьте, что backend запущен.",
+    nothing_found: "Ничего не нашлось — попробуйте другой запрос",
+    fav_empty: "В избранном пока пусто — жмите ♥ на букетах",
+
+    nav_catalog: "Каталог",
+    nav_favorites: "Избранное",
+    nav_cart: "Корзина",
+    nav_profile: "Профиль",
+
+    cart_title: "Корзина",
+    cart_empty: "Корзина пуста",
+    checkout_arrow: "Оформить →",
+    place_order: "Оформить заказ",
+    total: "Итого",
+    to_pay: "К оплате",
+    delivery_fee_line: "Доставка",
+    items_line: "Товары",
+    added_to_cart: "Добавлено в корзину",
+    cart_count: "{n} товар(а) · {sum}",
+
+    checkout_title: "Оформление заказа",
+    delivery: "Доставка",
+    pickup: "Самовывоз",
+    zone_label: "Куда доставка",
+    zone_batumi: "По Батуми",
+    zone_outside: "За пределами Батуми",
+    zone_outside_note: "Доставка за город — через приложение недоступна. Напишите нам в директ, позвоните или заберите на точке.",
+    delivery_min_note: "Доставка от {sum}. Ниже этой суммы — только самовывоз.",
+    address_label: "Адрес доставки",
+    address_ph: "Улица, дом, квартира",
+    date_label: "Дата",
+    time_label: "Время",
+    asap: "Как можно скорее",
+    your_name: "Ваше имя",
+    your_phone: "Ваш телефон",
+    recipient_label: "Получатель (если это подарок)",
+    recipient_ph: "Оставьте пустым, если получаете сами",
+    card_label: "Текст открытки",
+    card_ph: "Например: «С днём рождения!»",
+    photo_before: "Прислать фото букета перед доставкой",
+    payment_method: "Способ оплаты",
+    pay_cash: "Наличные",
+    pay_card: "Карта курьеру",
+    pay_transfer: "Перевод",
+    confirm_order: "Подтвердить заказ",
+    sending: "Отправляем…",
+    order_fail: "Не получилось оформить заказ, попробуйте ещё раз",
+    order_auth_err: "Откройте приложение через Telegram, чтобы оформить заказ",
+    need_name_phone: "Укажите имя и телефон",
+
+    size: "Размер",
+    quantity: "Количество",
+    add_to_cart: "Добавить в корзину",
+    composition_prefix: "Состав",
+    in_stock: "в наличии",
+    made_to_order: "под заказ",
+    from_price: "от",
+    on_request: "по запросу",
+    see_full_desc: "Смотреть полное описание",
+    collapse: "Свернуть",
+    note_default: "Обратите внимание: цветы живые, поэтому композиция может немного отличаться от фото по оттенку, форме и наполнению — но она будет не менее красивой.",
+    benefit_packaging: "Гарантия качества — премиум-упаковка",
+    benefit_express: "Экспресс-доставка по Батуми",
+    express_default: "в течение часа",
+    benefit_pickup: "Самовывоз с точки",
+    acc_description: "Описание продукта",
+    acc_composition: "Состав букета",
+    acc_delivery: "Доставка и оплата",
+    delivery_info_default: "Доставка по Батуми при заказе от 100 ₾: 15 ₾ до 22:00, 30 ₾ с 22:00 до 00:00. За пределы Батуми — по договорённости, напишите нам напрямую. Оплата: наличными, картой курьеру или переводом.",
+    addons_title: "Дополнения к букету",
+    addons_cart_title: "Добавьте к заказу",
+
+    order_accepted: "Заказ №{n} принят",
+    order_accepted_sub: "Мы уже начали собирать ваш заказ. Сумма: {sum}",
+    done: "Готово",
+    my_orders: "Мои заказы",
+    orders_empty: "Здесь появятся ваши заказы",
+    order_num: "Заказ №{n}",
+    orders_load_err: "Не удалось загрузить заказы",
+    orders_auth_err: "Откройте приложение через Telegram, чтобы видеть заказы",
+    repeat_order: "Повторить заказ",
+    order_cancelled: "Заказ отменён",
+    adding: "Добавляем…",
+    partial_added: "Часть товаров недоступна — добавили что смогли",
+    items_unavailable: "Эти товары сейчас недоступны",
+    order_load_err: "Не удалось загрузить заказ",
+
+    st_new: "Новый",
+    st_confirmed: "Подтверждён",
+    st_assembling: "Собирается",
+    st_out_for_delivery: "В пути",
+    st_delivered: "Доставлен",
+    st_cancelled: "Отменён",
+
+    guest: "Гость",
+    appearance: "Оформление",
+    theme: "Тема",
+    theme_light: "Светлая",
+    theme_dark: "Тёмная",
+    theme_system: "Как в системе",
+    language: "Язык",
+    profile_hint: "Flowers Batum Flower · Батуми",
+    see_more: "смотреть ›",
+    contact: "Связаться",
+    call: "Позвонить",
+    address_title: "Адрес",
+  },
+
+  en: {
+    brand_loc: "Batumi · same-day delivery",
+    search_ph: "Search bouquets, occasions, flowers…",
+    popular: "Popular",
+    favorites: "Favorites",
+    filters: "Filters",
+    filters_soon: "Filters are coming soon",
+    loading_catalog: "Loading catalog…",
+    loading: "Loading…",
+    catalog_load_err: "Couldn't load the catalog. Make sure the backend is running.",
+    nothing_found: "Nothing found — try another search",
+    fav_empty: "No favorites yet — tap ♥ on bouquets",
+
+    nav_catalog: "Catalog",
+    nav_favorites: "Favorites",
+    nav_cart: "Cart",
+    nav_profile: "Profile",
+
+    cart_title: "Cart",
+    cart_empty: "Your cart is empty",
+    checkout_arrow: "Checkout →",
+    place_order: "Place order",
+    total: "Total",
+    to_pay: "To pay",
+    delivery_fee_line: "Delivery",
+    items_line: "Items",
+    added_to_cart: "Added to cart",
+    cart_count: "{n} item(s) · {sum}",
+
+    checkout_title: "Checkout",
+    delivery: "Delivery",
+    pickup: "Pickup",
+    zone_label: "Delivery area",
+    zone_batumi: "Within Batumi",
+    zone_outside: "Outside Batumi",
+    zone_outside_note: "Delivery outside Batumi isn't available in the app. Message us on direct, call, or pick up at the store.",
+    delivery_min_note: "Delivery from {sum}. Below that — pickup only.",
+    address_label: "Delivery address",
+    address_ph: "Street, building, apartment",
+    date_label: "Date",
+    time_label: "Time",
+    asap: "As soon as possible",
+    your_name: "Your name",
+    your_phone: "Your phone",
+    recipient_label: "Recipient (if it's a gift)",
+    recipient_ph: "Leave empty if it's for you",
+    card_label: "Card message",
+    card_ph: "E.g. “Happy birthday!”",
+    photo_before: "Send a photo of the bouquet before delivery",
+    payment_method: "Payment method",
+    pay_cash: "Cash",
+    pay_card: "Card to courier",
+    pay_transfer: "Bank transfer",
+    confirm_order: "Confirm order",
+    sending: "Sending…",
+    order_fail: "Couldn't place the order, please try again",
+    order_auth_err: "Open the app via Telegram to place an order",
+    need_name_phone: "Please enter your name and phone",
+
+    size: "Size",
+    quantity: "Quantity",
+    add_to_cart: "Add to cart",
+    composition_prefix: "Composition",
+    in_stock: "in stock",
+    made_to_order: "made to order",
+    from_price: "from",
+    on_request: "on request",
+    see_full_desc: "Read full description",
+    collapse: "Collapse",
+    note_default: "Please note: flowers are live, so the arrangement may differ slightly from the photo in shade, shape and filling — but it will be just as beautiful.",
+    benefit_packaging: "Quality guarantee — premium packaging",
+    benefit_express: "Express delivery in Batumi",
+    express_default: "within an hour",
+    benefit_pickup: "Pickup at the store",
+    acc_description: "Product description",
+    acc_composition: "Bouquet composition",
+    acc_delivery: "Delivery and payment",
+    delivery_info_default: "Delivery in Batumi for orders from 100 ₾: 15 ₾ before 22:00, 30 ₾ from 22:00 to 00:00. Outside Batumi — by arrangement, message us directly. Payment: cash, card to courier, or bank transfer.",
+    addons_title: "Add to your bouquet",
+    addons_cart_title: "Add to your order",
+
+    order_accepted: "Order #{n} accepted",
+    order_accepted_sub: "We've started preparing your order. Total: {sum}",
+    done: "Done",
+    my_orders: "My orders",
+    orders_empty: "Your orders will appear here",
+    order_num: "Order #{n}",
+    orders_load_err: "Couldn't load orders",
+    orders_auth_err: "Open the app via Telegram to see your orders",
+    repeat_order: "Repeat order",
+    order_cancelled: "Order cancelled",
+    adding: "Adding…",
+    partial_added: "Some items are unavailable — added what we could",
+    items_unavailable: "These items are unavailable right now",
+    order_load_err: "Couldn't load the order",
+
+    st_new: "New",
+    st_confirmed: "Confirmed",
+    st_assembling: "Preparing",
+    st_out_for_delivery: "On the way",
+    st_delivered: "Delivered",
+    st_cancelled: "Cancelled",
+
+    guest: "Guest",
+    appearance: "Appearance",
+    theme: "Theme",
+    theme_light: "Light",
+    theme_dark: "Dark",
+    theme_system: "System",
+    language: "Language",
+    profile_hint: "Flowers Batum Flower · Batumi",
+    see_more: "view ›",
+    contact: "Contact us",
+    call: "Call",
+    address_title: "Address",
+  },
+};
+
+let currentLang = "ru";
+
+export function getLang() {
+  return currentLang;
+}
+
+export function setLang(lang) {
+  currentLang = STRINGS[lang] ? lang : "ru";
+  return currentLang;
+}
+
+// Определить язык по умолчанию из Telegram (ru → русский, иначе английский).
+export function detectLang(tg) {
+  const code = (tg?.initDataUnsafe?.user?.language_code || "").toLowerCase();
+  return code.startsWith("ru") ? "ru" : "en";
+}
+
+// t("key", { n: 3, sum: "100 ₾" }) — с подстановкой {name}.
+export function t(key, vars) {
+  const dict = STRINGS[currentLang] || STRINGS.ru;
+  let s = dict[key] != null ? dict[key] : (STRINGS.ru[key] != null ? STRINGS.ru[key] : key);
+  if (vars) {
+    for (const k in vars) s = s.replace(new RegExp("\\{" + k + "\\}", "g"), vars[k]);
+  }
+  return s;
+}
+
+// Проставить переводы по атрибутам data-i18n / data-i18n-placeholder в разметке.
+export function applyDomI18n(root = document) {
+  root.querySelectorAll("[data-i18n]").forEach((el) => {
+    el.textContent = t(el.getAttribute("data-i18n"));
+  });
+  root.querySelectorAll("[data-i18n-placeholder]").forEach((el) => {
+    el.setAttribute("placeholder", t(el.getAttribute("data-i18n-placeholder")));
+  });
+  document.documentElement.setAttribute("lang", currentLang);
+}

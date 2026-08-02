@@ -231,3 +231,27 @@
 .od-sub { font-size: 12.5px; color: var(--ink-muted); margin-bottom: 16px; }
 .od-items { margin-top: 8px; }
 .order-cancelled { background: rgba(194,59,59,0.12); color: var(--danger); padding: 10px 14px; border-radius: var(--radius-s); font-size: 13px; margin: 6px 0 4px; }
+
+/* ==== обогащённая карточка товара ==== */
+.pd-desc.clamp { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.pd-more { background: none; border: none; padding: 0; margin: -4px 0 12px; color: var(--petrol); font-size: 13px; font-weight: 600; cursor: pointer; font-family: var(--font-body); text-decoration: underline; }
+.pd-note { background: var(--rose-soft); color: var(--rose-dark); border-radius: 12px; padding: 11px 13px; font-size: 12.5px; line-height: 1.5; margin: 4px 0 16px; }
+.pd-benefits { display: flex; flex-direction: column; gap: 11px; margin-bottom: 20px; }
+.pd-benefit { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--ink); }
+.pd-bic { flex: none; width: 22px; height: 22px; color: var(--petrol); }
+.pd-bic svg { width: 22px; height: 22px; }
+.pd-accs { margin: 6px 0 4px; border-top: 1px solid var(--border); }
+.pd-acc { border-bottom: 1px solid var(--border); }
+.pd-acc-head { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; background: none; border: none; padding: 14px 2px; font-family: var(--font-body); font-size: 14px; font-weight: 600; color: var(--ink); cursor: pointer; text-align: left; }
+.pd-acc-chev { color: var(--faint); transition: transform 0.2s ease; flex: none; }
+.pd-acc.open .pd-acc-chev { transform: rotate(180deg); }
+.pd-acc-body { max-height: 0; overflow: hidden; transition: max-height 0.25s ease; font-size: 13.5px; color: var(--ink-muted); line-height: 1.55; }
+.pd-acc.open .pd-acc-body { max-height: 600px; padding: 0 2px 14px; }
+
+/* ==== заметки/суммы на оформлении ==== */
+.checkout-note { font-size: 12.5px; color: var(--ink-muted); background: var(--surface); border-radius: 10px; padding: 10px 12px; margin: -6px 0 14px; line-height: 1.45; }
+.checkout-note.warn { background: rgba(194,59,59,0.10); color: var(--danger); }
+#checkout-total { flex-direction: column; align-items: stretch; gap: 6px; font-weight: 400; padding: 10px 2px 4px; }
+.ct-row { display: flex; align-items: center; justify-content: space-between; font-size: 14px; color: var(--ink-muted); }
+.ct-row.ct-total { font-size: 16px; font-weight: 700; color: var(--ink); border-top: 1px solid var(--border); padding-top: 8px; margin-top: 2px; }
+.btn.is-disabled { opacity: 0.5; }
