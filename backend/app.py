@@ -63,6 +63,16 @@ def _too_large(_e):
 # --------------------------------------------------------------------------
 def bootstrap():
     conn = get_db()
+    # Диагностика персистентности: где лежит БД и есть ли уже данные ДО сева.
+    # Если при каждом старте products=0 — значит файл не на постоянном Volume.
+    try:
+        _sz = os.path.getsize(DB_PATH) if os.path.exists(DB_PATH) else -1
+        _pc = conn.execute("SELECT COUNT(*) c FROM products").fetchone()["c"]
+        _cc = conn.execute("SELECT COUNT(*) c FROM categories").fetchone()["c"]
+        _oc = conn.execute("SELECT COUNT(*) c FROM orders").fetchone()["c"]
+        print(f"[db] DB_PATH={DB_PATH} size={_sz}B products={_pc} categories={_cc} orders={_oc}", flush=True)
+    except Exception as _e:
+        print(f"[db] diag failed: {_e}", flush=True)
     if not conn.execute("SELECT 1 FROM locations LIMIT 1").fetchone():
         conn.execute(
             "INSERT INTO locations (id, name, address) VALUES (1, ?, ?)",
