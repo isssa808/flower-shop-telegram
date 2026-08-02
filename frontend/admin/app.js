@@ -61,8 +61,8 @@ function statusLabelRu(s) {
   return { in_stock: "в наличии", made_to_order: "под заказ", hidden: "скрыт" }[s] || s;
 }
 const STATUS_LABELS = {
-  new: "Новый", confirmed: "Подтверждён", assembling: "Собирается",
-  out_for_delivery: "В пути", delivered: "Доставлен", cancelled: "Отменён",
+  new: "Новый", assembling: "Собирается", assembled: "Собран",
+  out_for_delivery: "Передан курьеру", delivered: "Доставлен", cancelled: "Отменён",
 };
 
 // ---------------------------------------------------------------------
@@ -111,23 +111,35 @@ function renderOrders() {
   }
   wrap.innerHTML = state.orders
     .map(
-      (o) => `
+      (o) => {
+        const thumb = o.items.find((i) => i.photo_url)?.photo_url;
+        const times = [
+          o.assembled_at ? `собран ${o.assembled_at}` : "",
+          o.handed_at ? `передан ${o.handed_at}` : "",
+          o.delivered_at ? `доставлен ${o.delivered_at}` : "",
+        ].filter(Boolean).join(" · ");
+        return `
     <div class="card order-card" data-order="${o.id}">
       <div class="order-card-top">
-        <div>
-          <div class="order-id">Заказ №${o.id}</div>
-          <div class="order-customer">${o.customer_name || "—"} · ${o.customer_phone || "без телефона"}</div>
+        <div style="display:flex; gap:10px; align-items:flex-start;">
+          ${thumb ? `<img class="order-thumb" src="${thumb}" alt=""/>` : ""}
+          <div>
+            <div class="order-id">Заказ №${o.id}</div>
+            <div class="order-customer">${o.customer_name || "—"} · ${o.customer_phone || "без телефона"}</div>
+          </div>
         </div>
         <div class="order-total">${money(o.total)}</div>
       </div>
       <div class="order-meta">
         ${o.fulfillment_type === "delivery" ? `Доставка: ${o.address || "—"} · ${o.delivery_date || ""} ${o.delivery_slot || ""}` : "Самовывоз"}<br/>
         ${o.items.map((i) => `${i.product_name} (${i.variant_label}) ×${i.quantity}`).join(", ")}
+        ${times ? `<br/><span class="order-times">${times}</span>` : ""}
       </div>
       <select class="status-select" data-order-id="${o.id}">
         ${Object.entries(STATUS_LABELS).map(([val, label]) => `<option value="${val}" ${o.status === val ? "selected" : ""}>${label}</option>`).join("")}
       </select>
-    </div>`
+    </div>`;
+      }
     )
     .join("");
 
@@ -155,6 +167,9 @@ function renderOrders() {
 function openOrderDetail(orderId) {
   const o = state.orders.find((x) => x.id === orderId);
   if (!o) return;
+  const timeRows = [
+    ["Собран", o.assembled_at], ["Передан курьеру", o.handed_at], ["Доставлен", o.delivered_at],
+  ].filter(([, v]) => v);
   el("order-detail-content").innerHTML = `
     <h2>Заказ №${o.id}</h2>
     <div class="order-meta" style="margin-bottom:14px;">
@@ -165,9 +180,13 @@ function openOrderDetail(orderId) {
       ${o.photo_before_delivery ? "📷 Прислать фото перед доставкой<br/>" : ""}
       Оплата: ${o.payment_method}
     </div>
-    ${o.items.map((i) => `<div class="cart-line"><div class="cl-info"><div class="cl-name">${i.product_name}</div><div class="cl-variant">${i.variant_label} ×${i.quantity}</div></div><div class="cl-price">${money(i.price * i.quantity)}</div></div>`).join("")}
+    ${o.items.map((i) => `<div class="cart-line">
+        ${i.photo_url ? `<img class="order-thumb" src="${i.photo_url}" alt=""/>` : ""}
+        <div class="cl-info"><div class="cl-name">${i.product_name}</div><div class="cl-variant">${i.variant_label} ×${i.quantity}</div></div>
+        <div class="cl-price">${money(i.price * i.quantity)}</div></div>`).join("")}
     ${o.delivery_fee ? `<div class="cart-line"><div class="cl-info"><div class="cl-name">Доставка</div></div><div class="cl-price">${money(o.delivery_fee)}</div></div>` : ""}
     <div class="cart-total"><span>Итого</span><span>${money(o.total)}</span></div>
+    ${timeRows.length ? `<div class="order-meta" style="margin-top:12px;">${timeRows.map(([l, v]) => `${l}: ${v}`).join("<br/>")}</div>` : ""}
   `;
   openSheet("order-detail");
 }
@@ -711,7 +730,8 @@ function renderSettings() {
           <div class="field"><label>Дневной тариф, ₾</label><input name="delivery_fee_day" type="number" step="1" value="${esc(s.delivery_fee_day)}"/></div>
           <div class="field"><label>Ночной тариф, ₾</label><input name="delivery_fee_night" type="number" step="1" value="${esc(s.delivery_fee_night)}"/></div>
         </div>
-        <div class="cr-meta" style="margin:-4px 0 10px;">Заказ меньше мин. суммы — только самовывоз. Дневной тариф — до «времени смены», ночной — после (приём до 00:00). Доставка только по Батуми.</div>
+        <div class="field"><label>Лимит доставок на 1 слот (2 часа)</label><input name="slot_capacity" type="number" step="1" min="1" value="${esc(s.slot_capacity)}"/></div>
+        <div class="cr-meta" style="margin:-4px 0 10px;">Заказ меньше мин. суммы — только самовывоз. Дневной тариф — до «времени смены», ночной — после (приём до 00:00). Доставка только по Батуми. Когда лимит на слот исчерпан — это время исчезает у клиента.</div>
 
         <h3 class="settings-group">Контакты</h3>
         <div class="field"><label>Телефон</label><input name="shop_phone" value="${esc(s.shop_phone)}" placeholder="+995 5xx xx xx xx"/></div>
@@ -753,6 +773,7 @@ function renderSettings() {
           delivery_fee_day: fd.get("delivery_fee_day"),
           delivery_fee_night: fd.get("delivery_fee_night"),
           delivery_day_end: fd.get("delivery_day_end"),
+          slot_capacity: fd.get("slot_capacity"),
           shop_phone: fd.get("shop_phone"),
           shop_instagram: fd.get("shop_instagram"),
           express_delivery_text: fd.get("express_delivery_text"),
@@ -769,6 +790,35 @@ function renderSettings() {
   });
 }
 
+// --- Статистика продаж (только владелец): день/месяц ---
+async function renderStats(period = "day") {
+  const wrap = el("stats-wrap");
+  if (!wrap) return;
+  let data;
+  try {
+    data = await apiFetch(`/api/admin/stats?period=${period}`, { tg });
+  } catch {
+    wrap.innerHTML = `<div class="empty-state">Не удалось загрузить статистику</div>`;
+    return;
+  }
+  wrap.innerHTML = `
+    <div class="card" style="padding:14px;">
+      <div class="tabs" id="stats-tabs">
+        <button class="tab ${period === "day" ? "active" : ""}" data-period="day">День</button>
+        <button class="tab ${period === "month" ? "active" : ""}" data-period="month">Месяц</button>
+      </div>
+      <div class="stats-grid">
+        <div class="stat"><div class="stat-num">${data.orders}</div><div class="stat-label">Заказов выполнено</div></div>
+        <div class="stat"><div class="stat-num">${data.bouquets}</div><div class="stat-label">Букетов продано</div></div>
+        <div class="stat"><div class="stat-num">${money(data.revenue)}</div><div class="stat-label">Выручка</div></div>
+      </div>
+      <div class="cr-meta" style="margin-top:8px;">Считаются доставленные заказы за выбранный период (время Батуми).</div>
+    </div>`;
+  wrap.querySelectorAll("#stats-tabs .tab").forEach((b) =>
+    b.addEventListener("click", () => renderStats(b.dataset.period))
+  );
+}
+
 // ---------------------------------------------------------------------
 async function init() {
   try {
@@ -781,25 +831,31 @@ async function init() {
   el("admin-main").style.display = "block";
   el("bottom-nav").style.display = "flex";
 
-  await loadCategories();
+  // Заказы доступны и владельцу, и флористу.
   renderOrderTabs();
-  await Promise.all([loadOrders(), loadProducts(), loadStock()]);
+  await loadOrders();
   renderOrders();
-  renderCatalog();
-  renderStock();
 
-  // Раздел «Настройки» — только для владельца: управление категориями,
-  // персоналом и параметрами магазина.
   if (isOwner()) {
+    // Владелец: каталог, склад, настройки, статистика.
     el("nav-settings").style.display = "flex";
     try {
-      await Promise.all([loadStaffList(), loadSettings()]);
+      await loadCategories();
+      await Promise.all([loadProducts(), loadStock(), loadStaffList(), loadSettings()]);
+      renderCatalog();
+      renderStock();
       renderCategoriesAdmin();
       renderStaffAdmin();
       renderSettings();
+      renderStats();
     } catch (err) {
-      // раздел просто останется пустым, остальное работает
+      // часть разделов может остаться пустой, заказы всё равно работают
     }
+  } else {
+    // Флорист: только заказы — прячем вкладки Каталог и Склад.
+    document
+      .querySelectorAll('.nav-btn[data-view="catalog"], .nav-btn[data-view="stock"]')
+      .forEach((b) => (b.style.display = "none"));
   }
 }
 init();

@@ -88,6 +88,10 @@ def bootstrap():
     _add_column_if_missing(conn, "products", "badge", "TEXT NOT NULL DEFAULT ''")
     _add_column_if_missing(conn, "orders", "delivery_zone", "TEXT")
     _add_column_if_missing(conn, "orders", "delivery_fee", "REAL NOT NULL DEFAULT 0")
+    # Отметки времени переходов статуса — для истории (время сборки/передачи/доставки).
+    _add_column_if_missing(conn, "orders", "assembled_at", "TEXT")
+    _add_column_if_missing(conn, "orders", "handed_at", "TEXT")
+    _add_column_if_missing(conn, "orders", "delivered_at", "TEXT")
 
     # Разовая зачистка файла-метки, оставшегося после диагностики персистентности.
     try:
@@ -208,17 +212,100 @@ bootstrap()
 # было ставить лишние пакеты. Если сети нет или BOT_TOKEN не настоящий,
 # просто тихо логируем и не роняем запрос — заказ важнее уведомления.
 # --------------------------------------------------------------------------
-def notify_telegram(chat_id, text):
+# Максимум попыток досыла одного уведомления, после чего помечаем failed.
+NOTIFY_MAX_ATTEMPTS = 12
+
+
+def _send_message_api(chat_id, text, reply_markup=None):
+    """Один вызов sendMessage. Возвращает True при успехе. reply_markup — dict
+    или JSON-строка (для кнопки «Открыть в админке»)."""
     if not chat_id or BOT_TOKEN == "LOCAL_DEV_TOKEN":
         app.logger.info(f"[notify skip] to={chat_id}: {text}")
-        return
+        return False
+    payload = {"chat_id": chat_id, "text": text}
+    if reply_markup:
+        payload["reply_markup"] = json.loads(reply_markup) if isinstance(reply_markup, str) else reply_markup
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    data = json.dumps({"chat_id": chat_id, "text": text}).encode()
+    data = json.dumps(payload).encode()
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
     try:
-        urllib.request.urlopen(req, timeout=5)
-    except (urllib.error.URLError, TimeoutError) as e:
-        app.logger.warning(f"[notify failed] {e}")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return json.loads(resp.read()).get("ok", False)
+    except (urllib.error.URLError, TimeoutError, ValueError) as e:
+        app.logger.warning(f"[notify failed] to={chat_id}: {e}")
+        return False
+
+
+def enqueue_notification(chat_id, text, reply_markup=None):
+    """Кладём уведомление в outbox (переживает падение сети) и сразу пробуем
+    отправить. Если не вышло — останется pending, фоновый поток досылает.
+    Заказ уже в БД к этому моменту, поэтому он не потеряется в любом случае."""
+    if not chat_id:
+        return
+    rm_json = json.dumps(reply_markup) if isinstance(reply_markup, dict) else reply_markup
+    conn = get_db()
+    cur = conn.execute(
+        "INSERT INTO notifications (chat_id, text, reply_markup, status, attempts) "
+        "VALUES (?, ?, ?, 'pending', 0)",
+        (str(chat_id), text, rm_json),
+    )
+    note_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    # Best-effort немедленная отправка (в проде BOT_TOKEN настоящий).
+    if BOT_TOKEN != "LOCAL_DEV_TOKEN" and _send_message_api(chat_id, text, rm_json):
+        conn = get_db()
+        conn.execute("UPDATE notifications SET status='sent', attempts=1 WHERE id=?", (note_id,))
+        conn.commit()
+        conn.close()
+
+
+# Совместимость со старым именем: обычное текстовое уведомление через outbox.
+def notify_telegram(chat_id, text):
+    enqueue_notification(chat_id, text)
+
+
+def _notify_process_pending():
+    """Досылаем висящие уведомления. Вызывается фоновым потоком раз в ~15с."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM notifications WHERE status='pending' AND attempts < ? "
+        "ORDER BY id LIMIT 20",
+        (NOTIFY_MAX_ATTEMPTS,),
+    ).fetchall()
+    conn.close()
+    for r in rows:
+        ok = _send_message_api(r["chat_id"], r["text"], r["reply_markup"])
+        conn = get_db()
+        if ok:
+            conn.execute("UPDATE notifications SET status='sent', attempts=attempts+1 WHERE id=?", (r["id"],))
+        else:
+            new_attempts = r["attempts"] + 1
+            new_status = "failed" if new_attempts >= NOTIFY_MAX_ATTEMPTS else "pending"
+            conn.execute(
+                "UPDATE notifications SET status=?, attempts=? WHERE id=?",
+                (new_status, new_attempts, r["id"]),
+            )
+            if new_status == "failed":
+                app.logger.error(f"[notify give up] id={r['id']} chat={r['chat_id']}")
+        conn.commit()
+        conn.close()
+
+
+def _notify_retry_loop():
+    while True:
+        try:
+            _notify_process_pending()
+        except Exception as e:
+            app.logger.warning(f"[notify loop] {e}")
+        time.sleep(15)
+
+
+def start_notify_thread():
+    if BOT_TOKEN == "LOCAL_DEV_TOKEN":
+        return
+    threading.Thread(target=_notify_retry_loop, daemon=True).start()
+    print("[notify] outbox-поток запущен (досыл pending раз в 15с)", flush=True)
 
 
 # Чат/канал персонала для новых заказов. Если не задан — шлём владельцу в личку
@@ -345,6 +432,7 @@ def start_bot_thread():
 
 setup_bot_menu()
 start_bot_thread()
+start_notify_thread()
 
 
 # --------------------------------------------------------------------------
@@ -428,6 +516,7 @@ SHOP_DEFAULTS = {
     "delivery_fee_day": "15",
     "delivery_fee_night": "30",
     "delivery_day_end": "22:00",   # после этого времени — ночной тариф (приём до 00:00)
+    "slot_capacity": "2",          # макс. заказов на один 2-часовой слот доставки
     "shop_phone": "",
     "shop_instagram": "flowers_batum_flower",
     "express_delivery_text": "в течение часа",
@@ -474,6 +563,61 @@ def compute_delivery_fee(slot):
         now = time.gmtime(time.time() + 4 * 3600)  # Батуми = UTC+4, без перехода на летнее время
         start = now.tm_hour * 60 + now.tm_min
     return _num_setting("delivery_fee_night") if start >= day_end else _num_setting("delivery_fee_day")
+
+
+# Фиксированные 2-часовые окна доставки (по ТЗ владельца). 09-11 и 10-12
+# пересекаются — так и задумано. Формат значения совпадает с тем, что уходит в
+# заказ (delivery_slot) и парсится compute_delivery_fee.
+DELIVERY_SLOTS = [
+    "09:00-11:00", "10:00-12:00", "12:00-14:00", "14:00-16:00",
+    "16:00-18:00", "18:00-20:00", "20:00-22:00",
+]
+
+
+def _batumi_now():
+    """Текущее время Батуми (UTC+4, без переходов на летнее время)."""
+    return time.gmtime(time.time() + 4 * 3600)
+
+
+def _batumi_today_str():
+    n = _batumi_now()
+    return f"{n.tm_year:04d}-{n.tm_mon:02d}-{n.tm_mday:02d}"
+
+
+def _slot_capacity():
+    try:
+        return max(1, int(float(get_setting_or_default("slot_capacity"))))
+    except (ValueError, TypeError):
+        return 2
+
+
+def slot_taken_count(conn, date, slot):
+    """Сколько активных (не отменённых) заказов уже на эту дату+слот."""
+    return conn.execute(
+        "SELECT COUNT(*) c FROM orders WHERE delivery_date = ? AND delivery_slot = ? "
+        "AND status != 'cancelled'",
+        (date, slot),
+    ).fetchone()["c"]
+
+
+def available_slots(conn, date):
+    """Свободные слоты на дату: где заказов меньше лимита. Для сегодняшней даты
+    прошедшие по времени Батуми окна исключаем (start <= текущее время)."""
+    cap = _slot_capacity()
+    today = _batumi_today_str()
+    now_min = None
+    if date == today:
+        n = _batumi_now()
+        now_min = n.tm_hour * 60 + n.tm_min
+    result = []
+    for slot in DELIVERY_SLOTS:
+        if now_min is not None:
+            start = _parse_hhmm(slot.split("-")[0].strip())
+            if start is not None and start <= now_min:
+                continue  # окно уже началось/прошло
+        if slot_taken_count(conn, date, slot) < cap:
+            result.append(slot)
+    return result
 
 
 # Простая транслитерация для slug категории (имена — на русском). Slug виден
@@ -715,8 +859,57 @@ def api_favorite_toggle(product_id):
 
 
 # --------------------------------------------------------------------------
+# Публичные слоты доставки — клиент видит только свободные окна на дату.
+# --------------------------------------------------------------------------
+@app.route("/api/slots")
+def api_slots():
+    date = (request.args.get("date") or "").strip()
+    conn = get_db()
+    slots = available_slots(conn, date) if date else []
+    conn.close()
+    return jsonify({"date": date, "slots": slots, "capacity": _slot_capacity()})
+
+
+# --------------------------------------------------------------------------
 # Публичное API — заказы
 # --------------------------------------------------------------------------
+def format_order_message(order, items):
+    """Полный текст уведомления о заказе для общего чата персонала: состав,
+    суммы, доставка, контакты. order — dict строки orders, items — список dict
+    строк order_items. Заказ уже в БД, поэтому это только зеркало."""
+    total = order.get("total") or 0
+    fee = order.get("delivery_fee") or 0
+    items_total = total - fee
+    ful = "Доставка (Батуми)" if order.get("fulfillment_type") == "delivery" else "Самовывоз"
+    lines = [f"🌸 Новый заказ #{order['id']} — {int(total)} ₾", "", f"Тип: {ful}"]
+    when = " ".join(x for x in [order.get("delivery_date") or "", order.get("delivery_slot") or ""] if x)
+    if when:
+        lines.append(f"Когда: {when}")
+    if order.get("fulfillment_type") == "delivery" and order.get("address"):
+        lines.append(f"Адрес: {order['address']}")
+    lines.append("")
+    lines.append("Состав:")
+    for it in items:
+        label = f" ({it['variant_label']})" if it.get("variant_label") else ""
+        lines.append(f"• {it['product_name']}{label} ×{it['quantity']} — {int(it['price'] * it['quantity'])} ₾")
+    if fee:
+        lines.append(f"Доставка: {int(fee)} ₾ (товары {int(items_total)} ₾)")
+    lines.append("")
+    lines.append(f"Заказчик: {order.get('customer_name') or '—'}, {order.get('customer_phone') or '—'}")
+    if order.get("recipient_name") or order.get("recipient_phone"):
+        rn = order.get("recipient_name") or ""
+        rp = order.get("recipient_phone") or ""
+        lines.append(f"Получатель: {rn}{(', ' + rp) if rp else ''}".strip())
+    if order.get("card_message"):
+        lines.append(f"Открытка: {order['card_message']}")
+    pay = {"cash": "наличные", "card_courier": "карта курьеру", "transfer": "перевод"}.get(
+        order.get("payment_method"), order.get("payment_method") or "—")
+    lines.append(f"Оплата: {pay}")
+    lines.append("")
+    lines.append("Открыть админку: команда /admin у бота")
+    return "\n".join(lines)
+
+
 @app.route("/api/orders", methods=["POST"])
 @require_auth
 def api_create_order():
@@ -754,13 +947,34 @@ def api_create_order():
     fulfillment = body.get("fulfillment_type", "delivery")
     delivery_zone = None
     delivery_fee = 0
-    slot = body.get("delivery_slot", "") or ""
+    slot = (body.get("delivery_slot", "") or "").strip()
+    delivery_date = (body.get("delivery_date", "") or "").strip()
+    address = (body.get("address", "") or "").strip()
     if fulfillment == "delivery":
         zone = (body.get("delivery_zone") or "batumi").strip()
         if zone != "batumi":
             conn.close()
             return jsonify({"error": "delivery zone not served",
                             "detail": "Доставка через приложение — только по Батуми. За город напишите нам напрямую или выберите самовывоз."}), 400
+        # Обязательные поля доставки: без них заказ не оформить (надёжность ТЗ).
+        if not address:
+            conn.close()
+            return jsonify({"error": "address required", "detail": "Укажите адрес доставки"}), 400
+        if not delivery_date:
+            conn.close()
+            return jsonify({"error": "date required", "detail": "Выберите дату доставки"}), 400
+        if not slot:
+            conn.close()
+            return jsonify({"error": "slot required", "detail": "Выберите время доставки"}), 400
+        if slot not in DELIVERY_SLOTS:
+            conn.close()
+            return jsonify({"error": "invalid slot", "detail": "Выберите время из списка"}), 400
+        # Повторная проверка лимита слота перед вставкой — защита от гонки, когда
+        # окно заняли между показом клиенту и оформлением.
+        if slot_taken_count(conn, delivery_date, slot) >= _slot_capacity():
+            conn.close()
+            return jsonify({"error": "slot full",
+                            "detail": "Это время только что заняли, выберите другое"}), 409
         min_amount = _num_setting("min_delivery_amount")
         if items_total < min_amount:
             conn.close()
@@ -783,8 +997,8 @@ def api_create_order():
             customer_name,
             customer_phone,
             fulfillment,
-            body.get("address", "") if fulfillment == "delivery" else "",
-            body.get("delivery_date", ""),
+            address if fulfillment == "delivery" else "",
+            delivery_date,
             slot,
             body.get("recipient_name", ""),
             body.get("recipient_phone", ""),
@@ -821,14 +1035,19 @@ def api_create_order():
                 (r["flower_stock_id"], need, f"заказ #{order_id}"),
             )
 
+    # Полную строку заказа читаем обратно для богатого уведомления.
+    order_row = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
+    item_rows = conn.execute(
+        "SELECT product_name, variant_label, price, quantity FROM order_items WHERE order_id=?",
+        (order_id,),
+    ).fetchall()
     conn.commit()
     conn.close()
 
-    ful_ru = "Доставка (Батуми)" if fulfillment == "delivery" else "Самовывоз"
-    fee_note = f", доставка {int(delivery_fee)} ₾" if delivery_fee else ""
-    notify_telegram(
+    # Уведомление в общий чат персонала — через outbox (не потеряется, досылается).
+    enqueue_notification(
         resolve_staff_chat_id(),
-        f"🌸 Новый заказ #{order_id} на {int(total)} ₾ ({ful_ru}{fee_note}) — {customer_name}, {customer_phone}",
+        format_order_message(dict(order_row), [dict(i) for i in item_rows]),
     )
     return jsonify({"id": order_id, "total": total, "delivery_fee": delivery_fee,
                     "items_total": items_total, "status": "new"}), 201
@@ -878,7 +1097,7 @@ def api_admin_me():
 
 
 @app.route("/api/admin/products", methods=["GET", "POST"])
-@require_staff
+@require_owner
 def api_admin_products():
     conn = get_db()
     if request.method == "POST":
@@ -916,7 +1135,7 @@ def api_admin_products():
 
 
 @app.route("/api/admin/products/<int:product_id>", methods=["PUT", "DELETE"])
-@require_staff
+@require_owner
 def api_admin_product_edit(product_id):
     conn = get_db()
     if request.method == "DELETE":
@@ -938,6 +1157,10 @@ def api_admin_product_edit(product_id):
         "is_addon": 1 if body.get("is_addon") else 0,
         "badge": _clean_badge(body.get("badge")),
     }
+    # category_id обновляем только если пришёл (как photo_url): раньше его вообще
+    # не было в списке полей — из-за этого смена категории у товара не сохранялась.
+    if body.get("category_id") is not None:
+        fields["category_id"] = body["category_id"]
     if body.get("photo_url"):
         fields["photo_url"] = body["photo_url"]
     set_clause = ", ".join(f"{k}=?" for k in fields)  # ключи — фикс. литералы, не ввод
@@ -960,7 +1183,7 @@ def api_admin_product_edit(product_id):
 
 
 @app.route("/api/admin/products/<int:product_id>/photo", methods=["POST"])
-@require_staff
+@require_owner
 def api_admin_product_photo(product_id):
     if "photo" not in request.files:
         return jsonify({"error": "no file"}), 400
@@ -985,7 +1208,7 @@ def api_admin_product_photo(product_id):
 # Админ API — склад
 # --------------------------------------------------------------------------
 @app.route("/api/admin/stock", methods=["GET", "POST"])
-@require_staff
+@require_owner
 def api_admin_stock():
     conn = get_db()
     if request.method == "POST":
@@ -1032,7 +1255,7 @@ def _stock_movement(stock_id, movement_type, quantity, note):
 
 
 @app.route("/api/admin/stock/<int:stock_id>/income", methods=["POST"])
-@require_staff
+@require_owner
 def api_admin_stock_income(stock_id):
     body = request.get_json(force=True)
     updated = _stock_movement(stock_id, "income", float(body["quantity"]), body.get("note", "приход"))
@@ -1042,7 +1265,7 @@ def api_admin_stock_income(stock_id):
 
 
 @app.route("/api/admin/stock/<int:stock_id>/writeoff", methods=["POST"])
-@require_staff
+@require_owner
 def api_admin_stock_writeoff(stock_id):
     body = request.get_json(force=True)
     updated = _stock_movement(stock_id, "writeoff", float(body["quantity"]), body.get("note", "списание"))
@@ -1206,6 +1429,7 @@ def api_admin_staff_edit(staff_id):
 # который обрабатывается отдельно, и name/address — они в таблице locations).
 EDITABLE_SETTINGS = [
     "min_delivery_amount", "delivery_fee_day", "delivery_fee_night", "delivery_day_end",
+    "slot_capacity",
     "shop_phone", "shop_instagram", "express_delivery_text", "delivery_payment_info",
     "disclaimer_note",
 ]
@@ -1267,18 +1491,36 @@ def api_admin_orders():
     result = []
     for r in rows:
         o = dict(r)
-        items = conn.execute("SELECT * FROM order_items WHERE order_id=?", (o["id"],)).fetchall()
+        items = conn.execute(
+            "SELECT oi.*, p.photo_url FROM order_items oi "
+            "LEFT JOIN products p ON p.id = oi.product_id WHERE oi.order_id=?",
+            (o["id"],),
+        ).fetchall()
         o["items"] = [dict(i) for i in items]
         result.append(o)
     conn.close()
     return jsonify(result)
 
 
-VALID_STATUSES = ["new", "confirmed", "assembling", "out_for_delivery", "delivered", "cancelled"]
+# Цепочка статусов по ТЗ: создан → собирается → собран → передан курьеру →
+# доставлен (+ отменён). confirmed оставлен в лейблах для старых заказов.
+VALID_STATUSES = ["new", "assembling", "assembled", "out_for_delivery", "delivered", "cancelled"]
 STATUS_LABELS_RU = {
     "new": "Новый", "confirmed": "Подтверждён", "assembling": "Собирается",
-    "out_for_delivery": "В пути", "delivered": "Доставлен", "cancelled": "Отменён",
+    "assembled": "Собран", "out_for_delivery": "Передан курьеру",
+    "delivered": "Доставлен", "cancelled": "Отменён",
 }
+# При переходе в статус проставляем отметку времени в соответствующую колонку.
+STATUS_TIMESTAMP_COL = {
+    "assembled": "assembled_at",
+    "out_for_delivery": "handed_at",
+    "delivered": "delivered_at",
+}
+
+
+def _batumi_stamp():
+    n = _batumi_now()
+    return f"{n.tm_year:04d}-{n.tm_mon:02d}-{n.tm_mday:02d} {n.tm_hour:02d}:{n.tm_min:02d}"
 
 
 @app.route("/api/admin/orders/<int:order_id>/status", methods=["PUT"])
@@ -1293,15 +1535,62 @@ def api_admin_order_status(order_id):
         "UPDATE orders SET status=?, assigned_staff_id=COALESCE(?, assigned_staff_id) WHERE id=?",
         (status, body.get("assigned_staff_id"), order_id),
     )
+    # Отметка времени перехода (только если ещё не стояла — не перетираем при повторе).
+    ts_col = STATUS_TIMESTAMP_COL.get(status)
+    if ts_col:
+        conn.execute(
+            f"UPDATE orders SET {ts_col}=? WHERE id=? AND ({ts_col} IS NULL OR {ts_col}='')",
+            (_batumi_stamp(), order_id),
+        )
     conn.commit()
     order = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
     conn.close()
-    if order and order["customer_tg_id"]:
-        notify_telegram(
-            order["customer_tg_id"],
-            f"Статус заказа #{order_id}: {STATUS_LABELS_RU.get(status, status)}",
-        )
+    if order:
+        label = STATUS_LABELS_RU.get(status, status)
+        # Клиенту — в личку, персоналу — в общий чат (не только владельцу).
+        if order["customer_tg_id"]:
+            enqueue_notification(order["customer_tg_id"], f"Статус заказа #{order_id}: {label}")
+        enqueue_notification(resolve_staff_chat_id(), f"Заказ #{order_id}: статус → {label}")
     return jsonify(dict(order)) if order else (jsonify({"error": "not found"}), 404)
+
+
+# --------------------------------------------------------------------------
+# Админ API — статистика продаж (только владелец): день/месяц по доставленным.
+# --------------------------------------------------------------------------
+@app.route("/api/admin/stats")
+@require_owner
+def api_admin_stats():
+    period = request.args.get("period", "day")
+    n = _batumi_now()
+    if period == "month":
+        prefix = f"{n.tm_year:04d}-{n.tm_mon:02d}"      # YYYY-MM
+    else:
+        prefix = f"{n.tm_year:04d}-{n.tm_mon:02d}-{n.tm_mday:02d}"  # YYYY-MM-DD
+    conn = get_db()
+    # Ориентируемся на дату доставки (delivered_at); если её нет у старых заказов —
+    # берём по created_at. Считаем только доставленные заказы.
+    orders = conn.execute(
+        "SELECT id, total FROM orders WHERE status='delivered' AND "
+        "COALESCE(NULLIF(delivered_at,''), created_at) LIKE ?",
+        (prefix + "%",),
+    ).fetchall()
+    order_ids = [o["id"] for o in orders]
+    orders_count = len(order_ids)
+    revenue = sum(o["total"] or 0 for o in orders)
+    bouquets = 0
+    if order_ids:
+        placeholders = ",".join("?" * len(order_ids))
+        bouquets = conn.execute(
+            f"SELECT COALESCE(SUM(quantity),0) c FROM order_items WHERE order_id IN ({placeholders})",
+            order_ids,
+        ).fetchone()["c"]
+    conn.close()
+    return jsonify({
+        "period": period,
+        "orders": orders_count,
+        "bouquets": bouquets,
+        "revenue": revenue,
+    })
 
 
 if __name__ == "__main__":

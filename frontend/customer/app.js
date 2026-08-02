@@ -580,27 +580,46 @@ function batumiToday() {
   const b = new Date(now.getTime() + now.getTimezoneOffset() * 60000 + 4 * 3600000);
   return b.toISOString().slice(0, 10);
 }
-// Часовые интервалы времени доставки: 09:00–10:00 … 23:00–00:00 + «как можно скорее».
-function buildTimeSlots() {
+// Свободные слоты доставки на выбранную дату приходят с сервера: занятые (лимит
+// на слот исчерпан) и уже прошедшие сегодня окна не показываются. 2-часовые окна.
+async function loadSlots() {
   const sel = el("f-slot");
+  const dateEl = el("f-date");
   if (!sel) return;
+  const date = dateEl && dateEl.value;
   const prev = sel.value;
-  let html = `<option value="">${t("asap")}</option>`;
-  for (let h = 9; h < 24; h++) {
-    const a = String(h).padStart(2, "0") + ":00";
-    const b = String((h + 1) % 24).padStart(2, "0") + ":00";
-    html += `<option value="${a}-${b}">${a}–${b}</option>`;
+  if (!date) {
+    sel.innerHTML = `<option value="">${t("slot_pick_date")}</option>`;
+    updateCheckoutState();
+    return;
   }
-  sel.innerHTML = html;
-  if (prev) sel.value = prev;
+  sel.innerHTML = `<option value="">${t("slot_loading")}</option>`;
+  try {
+    const data = await apiFetch(`/api/slots?date=${encodeURIComponent(date)}`);
+    const slots = data.slots || [];
+    if (!slots.length) {
+      sel.innerHTML = `<option value="">${t("slot_none")}</option>`;
+    } else {
+      sel.innerHTML =
+        `<option value="">${t("slot_choose")}</option>` +
+        slots.map((s) => `<option value="${s}">${s.replace("-", "–")}</option>`).join("");
+      if (prev && slots.includes(prev)) sel.value = prev;
+    }
+  } catch (e) {
+    sel.innerHTML = `<option value="">${t("slot_none")}</option>`;
+  }
+  updateCheckoutState();
 }
 
 function openCheckout() {
   state.fulfillment = "delivery";
   state.zone = "batumi";
-  buildTimeSlots();
   const dateEl = el("f-date");
-  if (dateEl) dateEl.min = batumiToday();
+  if (dateEl) {
+    dateEl.min = batumiToday();
+    if (!dateEl.value) dateEl.value = batumiToday();
+  }
+  loadSlots();
   syncFulfillmentUi();
   updateCheckoutState();
   navPush("checkout");
@@ -637,7 +656,16 @@ function updateCheckoutState() {
   rows.push(`<div class="ct-row ct-total"><span>${t("to_pay")}</span><span>${money(total)}</span></div>`);
   el("checkout-total").innerHTML = rows.join("");
 
-  const blocked = belowMin || outside;
+  // Обязательные поля: имя и телефон всегда; для доставки — адрес, дата, слот.
+  const name = (el("f-name")?.value || "").trim();
+  const phone = (el("f-phone")?.value || "").trim();
+  const address = (el("f-address")?.value || "").trim();
+  const date = (el("f-date")?.value || "").trim();
+  const slot = (el("f-slot")?.value || "").trim();
+  const missingContact = !name || !phone;
+  const missingDelivery = isDelivery && (!address || !date || !slot);
+
+  const blocked = belowMin || outside || missingContact || missingDelivery;
   const btn = el("submit-order-btn");
   btn.disabled = blocked;
   btn.classList.toggle("is-disabled", blocked);
@@ -658,6 +686,12 @@ document.querySelectorAll("#zone-toggle .segmented-btn").forEach((btn) => {
   });
 });
 el("f-slot").addEventListener("change", updateCheckoutState);
+el("f-date").addEventListener("change", loadSlots);
+// Разблокировка кнопки по мере заполнения обязательных полей.
+["f-name", "f-phone", "f-address"].forEach((id) => {
+  const inp = el(id);
+  if (inp) inp.addEventListener("input", updateCheckoutState);
+});
 
 document.querySelectorAll("#payment-toggle .segmented-btn").forEach((btn) => {
   btn.addEventListener("click", () => {
@@ -712,7 +746,7 @@ el("checkout-form").addEventListener("submit", async (e) => {
   }
 });
 
-const STAGE_KEYS = ["new", "confirmed", "assembling", "out_for_delivery", "delivered"];
+const STAGE_KEYS = ["new", "assembling", "assembled", "out_for_delivery", "delivered"];
 
 function bloomProgressHtml(status) {
   const idx = STAGE_KEYS.findIndex((s) => s === status);

@@ -132,6 +132,19 @@ CREATE TABLE IF NOT EXISTS favorites (
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(tg_id, product_id)
 );
+
+-- Очередь уведомлений (outbox). Заказ пишется в БД раньше, поэтому даже если
+-- Telegram недоступен, заказ не теряется, а уведомление досылается фоновым
+-- повтором. status: pending | sent | failed.
+CREATE TABLE IF NOT EXISTS notifications (
+    id INTEGER PRIMARY KEY,
+    chat_id TEXT NOT NULL,
+    text TEXT NOT NULL,
+    reply_markup TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
