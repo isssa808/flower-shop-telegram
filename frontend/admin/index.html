@@ -43,12 +43,13 @@
         <div id="stock-list"></div>
       </section>
 
-      <section id="view-settings" class="admin-view" style="display:none;">
-        <div class="admin-section-head">
-          <h2>Статистика</h2>
-        </div>
-        <div id="stats-wrap"></div>
+      <section id="view-sales" class="admin-view" style="display:none;">
+        <div class="tabs" id="sales-period-tabs"></div>
+        <div id="sales-list"></div>
+        <div id="sales-total" class="sales-total-bar"></div>
+      </section>
 
+      <section id="view-settings" class="admin-view" style="display:none;">
         <div class="admin-section-head">
           <h2>Категории</h2>
           <button class="btn btn-primary btn-sm" id="add-category-btn">+ Категория</button>
@@ -73,6 +74,7 @@
     <button class="nav-btn active" data-view="orders"><span class="nav-icon">📦</span><span>Заказы</span></button>
     <button class="nav-btn" data-view="catalog"><span class="nav-icon">🌷</span><span>Каталог</span></button>
     <button class="nav-btn" data-view="stock"><span class="nav-icon">📋</span><span>Склад</span></button>
+    <button class="nav-btn" data-view="sales" id="nav-sales" style="display:none;"><span class="nav-icon">📊</span><span>Продажи</span></button>
     <button class="nav-btn" data-view="settings" id="nav-settings" style="display:none;"><span class="nav-icon">⚙️</span><span>Настройки</span></button>
   </nav>
 

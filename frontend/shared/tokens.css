@@ -261,11 +261,17 @@ h1, h2, h3, .display {
 .empty-state { text-align: center; padding: 48px 20px; color: var(--ink-muted); }
 .empty-state .icon { font-size: 40px; margin-bottom: 10px; }
 
+/* Тост снизу по центру, НАД нижним меню и safe-area — чтобы «динамический
+   остров» iPhone сверху его не перекрывал (раньше стоял top:14px и был не виден). */
 .toast {
-  position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
-  background: var(--ink); color: #fff; padding: 10px 18px; border-radius: 999px;
-  font-size: 13.5px; z-index: 60; opacity: 0; transition: opacity 0.2s ease;
-  pointer-events: none;
+  position: fixed;
+  bottom: calc(84px + max(env(safe-area-inset-bottom, 0px), var(--tg-safe-bottom, 0px)));
+  left: 50%; transform: translateX(-50%);
+  max-width: 88%; text-align: center;
+  background: var(--ink); color: #fff; padding: 11px 18px; border-radius: 14px;
+  font-size: 13.5px; line-height: 1.35; z-index: 60; opacity: 0;
+  transition: opacity 0.2s ease; pointer-events: none;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.22);
 }
 .toast.visible { opacity: 1; }
 

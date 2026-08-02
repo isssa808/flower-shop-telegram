@@ -20,6 +20,8 @@ const state = {
   orderFilter: "",
   staffList: [],
   settings: null,
+  salesPeriod: "day",
+  salesOrders: [],
 };
 
 function showToast(msg) {
@@ -75,6 +77,7 @@ document.querySelectorAll(".nav-btn").forEach((btn) => {
     state.view = btn.dataset.view;
     document.querySelectorAll(".admin-view").forEach((v) => (v.style.display = "none"));
     el(`view-${state.view}`).style.display = "block";
+    if (state.view === "sales" && isOwner()) renderSales();
   });
 });
 
@@ -166,7 +169,10 @@ function renderOrders() {
 
 function openOrderDetail(orderId) {
   const o = state.orders.find((x) => x.id === orderId);
-  if (!o) return;
+  if (o) renderOrderDetail(o);
+}
+
+function renderOrderDetail(o) {
   const timeRows = [
     ["Собран", o.assembled_at], ["Передан курьеру", o.handed_at], ["Доставлен", o.delivered_at],
   ].filter(([, v]) => v);
@@ -790,33 +796,84 @@ function renderSettings() {
   });
 }
 
-// --- Статистика продаж (только владелец): день/месяц ---
-async function renderStats(period = "day") {
-  const wrap = el("stats-wrap");
-  if (!wrap) return;
-  let data;
+// --- Продажи (только владелец): вкладка со списком выполненных заказов и
+// общей суммой внизу. Период день/месяц. ---
+// Текущая дата Батуми (UTC+4): {day:"YYYY-MM-DD", month:"YYYY-MM"}.
+function batumiParts() {
+  const now = new Date();
+  const b = new Date(now.getTime() + now.getTimezoneOffset() * 60000 + 4 * 3600000);
+  const y = b.getFullYear();
+  const m = String(b.getMonth() + 1).padStart(2, "0");
+  const d = String(b.getDate()).padStart(2, "0");
+  return { day: `${y}-${m}-${d}`, month: `${y}-${m}` };
+}
+// Дата заказа для фильтра: сначала delivered_at (Батуми), иначе created_at (UTC).
+function orderDateKey(o) {
+  return String(o.delivered_at || o.created_at || "").slice(0, 10);
+}
+
+function renderSalesTabs() {
+  el("sales-period-tabs").innerHTML = [["day", "День"], ["month", "Месяц"]]
+    .map(([v, l]) => `<button class="tab ${state.salesPeriod === v ? "active" : ""}" data-period="${v}">${l}</button>`)
+    .join("");
+  el("sales-period-tabs").querySelectorAll(".tab").forEach((b) =>
+    b.addEventListener("click", () => { state.salesPeriod = b.dataset.period; renderSalesTabs(); renderSales(); })
+  );
+}
+
+async function renderSales() {
+  renderSalesTabs();
+  const listWrap = el("sales-list");
+  const totalWrap = el("sales-total");
+  let orders;
   try {
-    data = await apiFetch(`/api/admin/stats?period=${period}`, { tg });
+    orders = await apiFetch(`/api/admin/orders?status=delivered&location_id=${LOCATION_ID}`, { tg });
   } catch {
-    wrap.innerHTML = `<div class="empty-state">Не удалось загрузить статистику</div>`;
+    listWrap.innerHTML = `<div class="empty-state">Не удалось загрузить продажи</div>`;
+    totalWrap.innerHTML = "";
     return;
   }
-  wrap.innerHTML = `
-    <div class="card" style="padding:14px;">
-      <div class="tabs" id="stats-tabs">
-        <button class="tab ${period === "day" ? "active" : ""}" data-period="day">День</button>
-        <button class="tab ${period === "month" ? "active" : ""}" data-period="month">Месяц</button>
+  const parts = batumiParts();
+  const period = state.salesPeriod;
+  const keyLen = period === "month" ? 7 : 10;
+  const want = period === "month" ? parts.month : parts.day;
+  const list = orders.filter((o) => orderDateKey(o).slice(0, keyLen) === want);
+  state.salesOrders = list;
+
+  if (!list.length) {
+    listWrap.innerHTML = `<div class="empty-state">За ${period === "month" ? "месяц" : "день"} выполненных заказов нет</div>`;
+  } else {
+    listWrap.innerHTML = list
+      .map((o) => {
+        const thumb = o.items.find((i) => i.photo_url)?.photo_url;
+        const names = o.items.map((i) => `${i.product_name}${i.variant_label ? ` (${i.variant_label})` : ""} ×${i.quantity}`).join(", ");
+        const when = o.delivered_at || o.delivery_date || "";
+        return `
+    <div class="card sale-card" data-sale="${o.id}">
+      ${thumb ? `<img class="order-thumb" src="${thumb}" alt=""/>` : `<div class="order-thumb"></div>`}
+      <div class="sale-info">
+        <div class="sale-title">Заказ №${o.id}${when ? ` · ${when}` : ""}</div>
+        <div class="sale-items">${names}</div>
       </div>
-      <div class="stats-grid">
-        <div class="stat"><div class="stat-num">${data.orders}</div><div class="stat-label">Заказов выполнено</div></div>
-        <div class="stat"><div class="stat-num">${data.bouquets}</div><div class="stat-label">Букетов продано</div></div>
-        <div class="stat"><div class="stat-num">${money(data.revenue)}</div><div class="stat-label">Выручка</div></div>
-      </div>
-      <div class="cr-meta" style="margin-top:8px;">Считаются доставленные заказы за выбранный период (время Батуми).</div>
+      <div class="order-total">${money(o.total)}</div>
     </div>`;
-  wrap.querySelectorAll("#stats-tabs .tab").forEach((b) =>
-    b.addEventListener("click", () => renderStats(b.dataset.period))
-  );
+      })
+      .join("");
+    listWrap.querySelectorAll("[data-sale]").forEach((c) =>
+      c.addEventListener("click", () => {
+        const o = state.salesOrders.find((x) => x.id === Number(c.dataset.sale));
+        if (o) renderOrderDetail(o);
+      })
+    );
+  }
+
+  const totalSum = list.reduce((s, o) => s + (o.total || 0), 0);
+  const bouquets = list.reduce((s, o) => s + o.items.reduce((n, i) => n + i.quantity, 0), 0);
+  totalWrap.innerHTML = `
+    <div class="sales-total-inner">
+      <div><span class="st-count">${list.length}</span> заказов · ${bouquets} букетов</div>
+      <div class="st-sum">${money(totalSum)}</div>
+    </div>`;
 }
 
 // ---------------------------------------------------------------------
@@ -837,8 +894,9 @@ async function init() {
   renderOrders();
 
   if (isOwner()) {
-    // Владелец: каталог, склад, настройки, статистика.
+    // Владелец: каталог, склад, настройки, продажи.
     el("nav-settings").style.display = "flex";
+    el("nav-sales").style.display = "flex";
     try {
       await loadCategories();
       await Promise.all([loadProducts(), loadStock(), loadStaffList(), loadSettings()]);
@@ -847,7 +905,7 @@ async function init() {
       renderCategoriesAdmin();
       renderStaffAdmin();
       renderSettings();
-      renderStats();
+      renderSales();
     } catch (err) {
       // часть разделов может остаться пустой, заказы всё равно работают
     }
