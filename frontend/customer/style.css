@@ -59,6 +59,30 @@
 .cl-qty { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
 .cl-qty .cl-qty-val { font-size: 13.5px; font-weight: 700; min-width: 16px; text-align: center; }
 .qty-btn.qty-btn-sm { width: 26px; height: 26px; font-size: 15px; line-height: 1; display: flex; align-items: center; justify-content: center; }
+
+/* --- Мои заказы --- */
+.topbar { position: relative; }
+.orders-link {
+  position: absolute; top: 0; right: 0;
+  background: var(--surface-2); border: 1px solid var(--border);
+  color: var(--ink); font-size: 12.5px; padding: 7px 12px; border-radius: 999px; cursor: pointer;
+}
+.order-row {
+  width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-s);
+  padding: 12px 14px; margin-bottom: 10px; cursor: pointer; text-align: left;
+}
+.or-id { font-size: 14px; font-weight: 600; }
+.or-date { font-size: 12px; color: var(--ink-muted); margin-top: 2px; }
+.or-right { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.or-status { font-size: 11.5px; font-weight: 600; padding: 3px 9px; border-radius: 999px; background: var(--surface); color: var(--ink-muted); white-space: nowrap; }
+.or-status.s-delivered { background: #E4F0E9; color: #2f6b4f; }
+.or-status.s-cancelled { background: #f3e0e0; color: #a3323b; }
+.or-status.s-confirmed, .or-status.s-assembling, .or-status.s-out_for_delivery { background: #f8e6ec; color: var(--rose); }
+.or-total { font-size: 13.5px; font-weight: 700; }
+.od-sub { font-size: 12.5px; color: var(--ink-muted); margin-bottom: 16px; }
+.od-items { margin-top: 8px; }
+.order-cancelled { background: #f3e0e0; color: #a3323b; padding: 10px 14px; border-radius: var(--radius-s); font-size: 13px; margin: 6px 0 4px; }
 .cart-total, .checkout-total {
   display: flex; justify-content: space-between; align-items: center;
   padding: 14px 2px; font-size: 15px; font-weight: 700;

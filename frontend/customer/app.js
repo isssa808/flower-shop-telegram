@@ -394,6 +394,123 @@ function renderConfirmation(order) {
 }
 
 // ---------------------------------------------------------------------
+// Мои заказы + отслеживание статуса + повтор заказа
+// ---------------------------------------------------------------------
+const ORDER_STATUS_LABEL = {
+  new: "Новый", confirmed: "Подтверждён", assembling: "Собирается",
+  out_for_delivery: "В пути", delivered: "Доставлен", cancelled: "Отменён",
+};
+
+el("my-orders-btn").addEventListener("click", async () => {
+  navPush("orders");
+  await loadMyOrders();
+});
+
+async function loadMyOrders() {
+  const list = el("orders-list");
+  list.innerHTML = `<div class="empty-state">Загружаем…</div>`;
+  try {
+    const orders = await apiFetch("/api/orders/mine", { tg });
+    if (!orders.length) {
+      list.innerHTML = `<div class="empty-state">Здесь появятся ваши заказы</div>`;
+      return;
+    }
+    list.innerHTML = orders
+      .map(
+        (o) => `
+      <button class="order-row" data-order="${o.id}">
+        <div>
+          <div class="or-id">Заказ №${o.id}</div>
+          <div class="or-date">${(o.created_at || "").slice(0, 10)}</div>
+        </div>
+        <div class="or-right">
+          <span class="or-status s-${o.status}">${ORDER_STATUS_LABEL[o.status] || o.status}</span>
+          <span class="or-total">${money(o.total)}</span>
+        </div>
+      </button>`
+      )
+      .join("");
+    list.querySelectorAll("[data-order]").forEach((btn) =>
+      btn.addEventListener("click", () => openOrderDetail(Number(btn.dataset.order)))
+    );
+  } catch (err) {
+    list.innerHTML = `<div class="empty-state">${
+      err.status === 401 ? "Откройте приложение через Telegram, чтобы видеть заказы" : "Не удалось загрузить заказы"
+    }</div>`;
+  }
+}
+
+async function openOrderDetail(orderId) {
+  navPush("orderdetail");
+  const box = el("orderdetail-content");
+  box.innerHTML = `<div class="sheet-handle-spacer"></div><div class="empty-state">Загружаем…</div>`;
+  try {
+    const o = await apiFetch(`/api/orders/${orderId}`, { tg });
+    const progress =
+      o.status === "cancelled"
+        ? `<div class="order-cancelled">Заказ отменён</div>`
+        : bloomProgressHtml(o.status);
+    box.innerHTML = `
+      <h2 style="margin-top:0;">Заказ №${o.id}</h2>
+      <div class="od-sub">${(o.created_at || "").slice(0, 16)} · ${money(o.total)}</div>
+      ${progress}
+      <div class="od-items">
+        ${o.items
+          .map(
+            (i) => `
+          <div class="cart-line">
+            <div class="cl-info">
+              <div class="cl-name">${i.product_name}</div>
+              <div class="cl-variant">${i.variant_label} · ×${i.quantity}</div>
+            </div>
+            <div class="cl-price">${money(i.price * i.quantity)}</div>
+          </div>`
+          )
+          .join("")}
+      </div>
+      <button class="btn btn-primary btn-block" id="repeat-order-btn" style="margin-top:18px;">Повторить заказ</button>
+    `;
+    el("repeat-order-btn").addEventListener("click", () => repeatOrder(o));
+  } catch (err) {
+    box.innerHTML = `<div class="empty-state">Не удалось загрузить заказ</div>`;
+  }
+}
+
+// Повтор заказа: подтягиваем актуальный товар по product_id, ищем тот же
+// вариант по названию (label) — цена берётся текущая. Недоступные пропускаем.
+async function repeatOrder(order) {
+  const btn = el("repeat-order-btn");
+  if (btn) { btn.disabled = true; btn.textContent = "Добавляем…"; }
+  let added = 0;
+  for (const it of order.items) {
+    if (!it.product_id) continue;
+    try {
+      const p = await apiFetch(`/api/products/${it.product_id}`, { tg });
+      const v = p.variants.find((x) => x.label === it.variant_label) || p.variants[0];
+      if (!v) continue;
+      const existing = state.cart.find((l) => l.variantId === v.id);
+      if (existing) existing.quantity += it.quantity;
+      else state.cart.push({
+        productId: p.id, name: p.name, photo: p.photo_url,
+        variantId: v.id, variantLabel: v.label, price: v.price, quantity: it.quantity,
+      });
+      added += 1;
+    } catch (_) { /* товар скрыт/удалён — пропускаем */ }
+  }
+  updateCartBar();
+  if (added) {
+    navReset();
+    renderCart();
+    navPush("cart");
+    tg.HapticFeedback?.notificationOccurred?.("success");
+    showToast(added === order.items.length ? "Добавлено в корзину" : "Часть товаров недоступна — добавили что смогли");
+  } else {
+    if (btn) { btn.disabled = false; btn.textContent = "Повторить заказ"; }
+    showToast("Эти товары сейчас недоступны");
+  }
+}
+
+// ---------------------------------------------------------------------
 init();
 async function init() {
   try {

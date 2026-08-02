@@ -11,6 +11,7 @@
 <body>
   <div class="app" id="app">
     <header class="topbar">
+      <button class="orders-link" id="my-orders-btn" type="button">Мои заказы</button>
       <div class="eyebrow">Flowers Batum Flower · Батуми</div>
       <h1>Свежие букеты<br />с доставкой сегодня</h1>
     </header>
@@ -125,6 +126,21 @@
   <div class="sheet" id="confirm-sheet">
     <div class="sheet-handle"></div>
     <div id="confirm-content"></div>
+  </div>
+
+  <!-- Мои заказы -->
+  <div class="sheet-backdrop" id="orders-backdrop" data-close="orders"></div>
+  <div class="sheet" id="orders-sheet">
+    <div class="sheet-handle"></div>
+    <h2>Мои заказы</h2>
+    <div id="orders-list"></div>
+  </div>
+
+  <!-- Детали заказа -->
+  <div class="sheet-backdrop" id="orderdetail-backdrop" data-close="orderdetail"></div>
+  <div class="sheet" id="orderdetail-sheet">
+    <div class="sheet-handle"></div>
+    <div id="orderdetail-content"></div>
   </div>
 
   <div class="toast" id="toast"></div>
