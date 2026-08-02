@@ -129,9 +129,16 @@ def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=5)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    # WAL даёт одновременные чтения во время записи и меньше конфликтов блокировок.
-    # Режим сохраняется на уровне файла БД, но выставлять при каждом коннекте безвредно.
-    conn.execute("PRAGMA journal_mode = WAL")
+    # ВАЖНО про персистентность на Railway: контейнер при редеплое завершается
+    # жёстко (SIGKILL), поэтому режим WAL здесь ТЕРЯЛ данные — закоммиченные
+    # строки оставались в shop.db-wal, который не сливался в основной файл и не
+    # переживал перезапуск (при каждом старте база была пустой). Поэтому
+    # используем обычный откатный журнал (DELETE) + synchronous=FULL: каждый
+    # commit пишется прямо в shop.db с fsync и durably остаётся на Volume.
+    # Для одного gunicorn-воркера потеря «параллельных чтений при записи»
+    # некритична, а надёжность данных важнее.
+    conn.execute("PRAGMA journal_mode = DELETE")
+    conn.execute("PRAGMA synchronous = FULL")
     return conn
 
 
