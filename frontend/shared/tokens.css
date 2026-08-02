@@ -23,6 +23,13 @@
 
   --font-display: "Unbounded", "Manrope", sans-serif;
   --font-body: "Manrope", -apple-system, BlinkMacSystemFont, sans-serif;
+
+  /* Безопасные отступы Telegram в полноэкранном режиме (задаются из JS,
+     см. initFullscreen в shared/telegram.js). Дефолт 0 — вне fullscreen. */
+  --tg-safe-top: 0px;
+  --tg-safe-bottom: 0px;
+  --tg-safe-left: 0px;
+  --tg-safe-right: 0px;
 }
 
 * { box-sizing: border-box; }
@@ -105,7 +112,7 @@ h1, h2, h3, .display {
 .topbar {
   background: var(--petrol);
   color: #fdf9f0;
-  padding: 18px 18px 14px;
+  padding: calc(18px + var(--tg-safe-top)) 18px 14px;
   border-radius: 0 0 var(--radius-l) var(--radius-l);
 }
 .topbar .eyebrow { font-size: 12px; opacity: 0.7; letter-spacing: 0.06em; text-transform: uppercase; }
@@ -161,7 +168,7 @@ h1, h2, h3, .display {
 
 /* --- нижняя плавающая панель корзины --- */
 .cart-bar {
-  position: fixed; left: 0; right: 0; bottom: 14px;
+  position: fixed; left: 0; right: 0; bottom: calc(14px + var(--tg-safe-bottom));
   max-width: 440px; margin: 0 auto;
   background: var(--petrol);
   color: #fff;

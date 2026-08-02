@@ -75,11 +75,28 @@ def bootstrap():
                 ("bouquets", "Букеты на каждый день", 1),
                 ("weddings", "Свадьбы и мероприятия", 2),
                 ("balloons", "Шары", 3),
-                ("strawberries", "Клубника в шоколаде", 4),
-                ("wrapping", "Подарочная упаковка", 5),
-                ("wholesale", "Опт", 6),
+                ("wrapping", "Подарочная упаковка", 4),
             ],
         )
+    # Разовая чистка: владелец попросил убрать категории «Клубника в шоколаде»
+    # и «Опт». На уже задеплоенных БД они засеялись раньше — удаляем их здесь.
+    # Товары такой категории (например демо-клубника) переносим в «Букеты» и
+    # прячем, чтобы не осталось «висящих» ссылок. Идемпотентно: после удаления
+    # категории делать нечего. Полноценное управление категориями — из админки.
+    default_cat = conn.execute(
+        "SELECT id FROM categories WHERE slug='bouquets'"
+    ).fetchone()
+    for slug in ("strawberries", "wholesale"):
+        row = conn.execute("SELECT id FROM categories WHERE slug=?", (slug,)).fetchone()
+        if not row:
+            continue
+        cid = row["id"]
+        if default_cat:
+            conn.execute(
+                "UPDATE products SET category_id=?, status='hidden' WHERE category_id=?",
+                (default_cat["id"], cid),
+            )
+        conn.execute("DELETE FROM categories WHERE id=?", (cid,))
     owner_id = os.environ.get("OWNER_TELEGRAM_ID", "").strip()
     if owner_id and not conn.execute("SELECT 1 FROM staff WHERE telegram_id=?", (owner_id,)).fetchone():
         conn.execute(
@@ -103,7 +120,7 @@ def seed_demo_catalog(conn):
     """Небольшой демо-ассортимент под точку id=1. Товары можно править и
     удалять в админке; повторно они не появятся, пока в каталоге есть хоть один
     товар (или если задать SEED_DEMO=0)."""
-    # id категорий совпадают с порядком вставки в bootstrap (bouquets=1 … wholesale=6)
+    # id категорий совпадают с порядком вставки в bootstrap (bouquets=1, weddings=2, balloons=3, wrapping=4)
     conn.executemany(
         "INSERT INTO products (id, location_id, category_id, name, description, composition, "
         "photo_url, status, occasion_tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -116,8 +133,6 @@ def seed_demo_catalog(conn):
              "розы, эвкалипт, лента", PLACEHOLDER_PHOTO, "made_to_order", "свадьба"),
             (4, 1, 3, "Шар фольгированный «Сердце»", "Гелиевый шар, 45 см",
              "1 шар", PLACEHOLDER_PHOTO, "in_stock", "день рождения,романтика"),
-            (5, 1, 4, "Клубника в шоколаде, набор 9 шт", "Свежая клубника в бельгийском шоколаде",
-             "9 ягод", PLACEHOLDER_PHOTO, "in_stock", "романтика,подарок"),
         ],
     )
     conn.executemany(
@@ -127,10 +142,9 @@ def seed_demo_catalog(conn):
             (2, "Стандарт — 15 тюльпанов", 65),
             (3, "По согласованию", 0),
             (4, "1 шт", 25),
-            (5, "Набор 9 шт", 70),
         ],
     )
-    print("[seed] демо-каталог создан (5 товаров)", flush=True)
+    print("[seed] демо-каталог создан (4 товара)", flush=True)
 
 
 bootstrap()

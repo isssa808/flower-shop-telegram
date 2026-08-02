@@ -1,8 +1,7 @@
-import { getTelegram, apiFetch } from "/shared/telegram.js";
+import { getTelegram, apiFetch, initFullscreen } from "/shared/telegram.js";
 
 const tg = getTelegram();
-tg.ready();
-tg.expand();
+initFullscreen(tg);
 
 const LOCATION_ID = 1;
 const el = (id) => document.getElementById(id);

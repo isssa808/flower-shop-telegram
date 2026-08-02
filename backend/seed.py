@@ -23,9 +23,7 @@ def seed():
         (1, "bouquets", "Букеты на каждый день", 1),
         (2, "weddings", "Свадьбы и мероприятия", 2),
         (3, "balloons", "Шары", 3),
-        (4, "strawberries", "Клубника в шоколаде", 4),
-        (5, "wrapping", "Подарочная упаковка", 5),
-        (6, "wholesale", "Опт", 6),
+        (4, "wrapping", "Подарочная упаковка", 4),
     ]
     cur.executemany(
         "INSERT INTO categories (id, slug, name, sort_order) VALUES (?, ?, ?, ?)",
@@ -57,10 +55,6 @@ def seed():
          "розы, эвкалипт, лента", PLACEHOLDER_PHOTO, "made_to_order", "свадьба"),
         (4, 1, 3, "Шар фольгированный «Сердце»", "Гелиевый шар, 45 см",
          "1 шар", PLACEHOLDER_PHOTO, "in_stock", "день рождения,романтика"),
-        (5, 1, 4, "Клубника в шоколаде, набор 9 шт", "Свежая клубника в бельгийском шоколаде",
-         "9 ягод", PLACEHOLDER_PHOTO, "in_stock", "романтика,подарок"),
-        (6, 1, 6, "Роза Netherlands — опт от 50 шт", "Оптовая поставка для кафе/бизнеса",
-         "розы поштучно", PLACEHOLDER_PHOTO, "made_to_order", "опт"),
     ]
     cur.executemany(
         "INSERT INTO products (id, location_id, category_id, name, description, composition, "
@@ -74,8 +68,6 @@ def seed():
         (3, 2, "Стандарт — 15 тюльпанов", 65),
         (4, 3, "По согласованию", 0),
         (5, 4, "1 шт", 25),
-        (6, 5, "Набор 9 шт", 70),
-        (7, 6, "За 1 шт (от 50 шт)", 3),
     ]
     cur.executemany(
         "INSERT INTO product_variants (id, product_id, label, price) VALUES (?, ?, ?, ?)",
@@ -100,7 +92,7 @@ def seed():
 
     conn.commit()
     conn.close()
-    print("Тестовые данные загружены: 2 точки, 6 категорий, 6 товаров, склад, 3 сотрудника")
+    print("Тестовые данные загружены: 2 точки, 4 категории, 4 товара, склад, 3 сотрудника")
 
 
 if __name__ == "__main__":
