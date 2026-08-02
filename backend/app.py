@@ -70,7 +70,16 @@ def bootstrap():
         _pc = conn.execute("SELECT COUNT(*) c FROM products").fetchone()["c"]
         _cc = conn.execute("SELECT COUNT(*) c FROM categories").fetchone()["c"]
         _oc = conn.execute("SELECT COUNT(*) c FROM orders").fetchone()["c"]
-        print(f"[db] DB_PATH={DB_PATH} size={_sz}B products={_pc} categories={_cc} orders={_oc}", flush=True)
+        _jm = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        _dir = os.path.dirname(DB_PATH) or "."
+        _files = []
+        for _f in sorted(os.listdir(_dir)):
+            try:
+                _files.append(f"{_f}:{os.path.getsize(os.path.join(_dir, _f))}")
+            except OSError:
+                _files.append(_f)
+        print(f"[db] DB_PATH={DB_PATH} size={_sz}B journal={_jm} products={_pc} categories={_cc} orders={_oc}", flush=True)
+        print(f"[db] {_dir} -> {_files}", flush=True)
     except Exception as _e:
         print(f"[db] diag failed: {_e}", flush=True)
     if not conn.execute("SELECT 1 FROM locations LIMIT 1").fetchone():
