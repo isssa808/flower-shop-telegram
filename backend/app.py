@@ -943,8 +943,6 @@ def format_order_message(order, items):
     pay = {"cash": "наличные", "card_courier": "карта курьеру", "transfer": "перевод"}.get(
         order.get("payment_method"), order.get("payment_method") or "—")
     lines.append(f"Оплата: {pay}")
-    lines.append("")
-    lines.append("Открыть админку: команда /admin у бота")
     return "\n".join(lines)
 
 
