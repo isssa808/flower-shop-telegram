@@ -364,6 +364,7 @@ def setup_bot_menu():
         "commands": [
             {"command": "start", "description": "Открыть магазин"},
             {"command": "admin", "description": "Панель персонала"},
+            {"command": "chatid", "description": "Показать ID этого чата"},
         ]
     })
     print(f"[bot setup] menu button -> {APP_URL} (button ok={ok_btn}, commands ok={ok_cmd})", flush=True)
@@ -417,6 +418,14 @@ def _bot_poll_loop():
                         "Панель для персонала (доступ только у сотрудников из таблицы staff).",
                         "🛠 Открыть админку", f"{APP_URL}/admin",
                     )
+                elif text.startswith("/chatid") or text.startswith("/id"):
+                    # Бот сам сообщает ID текущего чата — чтобы владелец вставил его
+                    # в Настройки → Уведомления (без сторонних ботов). Работает и в
+                    # группе (бот-админ получает все сообщения).
+                    _tg_call("sendMessage", {
+                        "chat_id": chat_id,
+                        "text": f"ID этого чата: {chat_id}\n\nСкопируйте его в админке → Настройки → Уведомления → «Chat ID для уведомлений о заказах».",
+                    })
             except Exception as e:
                 print(f"[bot] ошибка обработки апдейта: {e}", flush=True)
 
