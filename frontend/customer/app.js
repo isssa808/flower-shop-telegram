@@ -27,16 +27,52 @@ function showToast(msg) {
   setTimeout(() => t.classList.remove("visible"), 2200);
 }
 
-function openSheet(name) {
+// --- Навигация по шторкам + системная кнопка «Назад» Telegram ---------
+// history — стек открытых экранов. Пока в нём что-то есть, показываем
+// нативную кнопку «‹ Назад»; она закрывает верхнюю шторку и возвращает на
+// предыдущую (оформление → корзина → каталог). Когда стек пуст — кнопку
+// прячем, и Telegram сам показывает своё «Закрыть».
+const sheetHistory = [];
+const curSheet = () => sheetHistory[sheetHistory.length - 1];
+
+function showSheetEl(name) {
   el(`${name}-backdrop`).classList.add("open");
   el(`${name}-sheet`).classList.add("open");
 }
-function closeSheet(name) {
+function hideSheetEl(name) {
   el(`${name}-backdrop`).classList.remove("open");
   el(`${name}-sheet`).classList.remove("open");
 }
+function syncBackButton() {
+  if (sheetHistory.length) tg.BackButton?.show?.();
+  else tg.BackButton?.hide?.();
+}
+// Открыть новый экран поверх текущего (текущий остаётся в истории).
+function navPush(name) {
+  const cur = curSheet();
+  if (cur && cur !== name) hideSheetEl(cur);
+  sheetHistory.push(name);
+  showSheetEl(name);
+  syncBackButton();
+}
+// Назад: закрыть верхний экран и показать предыдущий (или каталог).
+function navBack() {
+  const cur = sheetHistory.pop();
+  if (cur) hideSheetEl(cur);
+  const prev = curSheet();
+  if (prev) showSheetEl(prev);
+  syncBackButton();
+}
+// Закрыть все шторки (например, после успешного заказа).
+function navReset() {
+  while (sheetHistory.length) hideSheetEl(sheetHistory.pop());
+  syncBackButton();
+}
+tg.BackButton?.onClick?.(navBack);
+tg.BackButton?.hide?.();
+// Клик по затемнению/крестику = «назад».
 document.querySelectorAll("[data-close]").forEach((b) =>
-  b.addEventListener("click", () => closeSheet(b.dataset.close))
+  b.addEventListener("click", navBack)
 );
 
 // ---------------------------------------------------------------------
@@ -116,7 +152,7 @@ function openProduct(p) {
   state.selectedVariantId = p.variants[0]?.id ?? null;
   state.selectedQty = 1;
   renderProductSheet();
-  openSheet("product");
+  navPush("product");
 }
 
 function renderProductSheet() {
@@ -182,7 +218,7 @@ function addSelectedToCart() {
   }
   tg.HapticFeedback?.impactOccurred("light");
   updateCartBar();
-  closeSheet("product");
+  navBack();
   showToast("Добавлено в корзину");
 }
 
@@ -208,7 +244,7 @@ function updateCartBar() {
 
 el("cart-bar").addEventListener("click", () => {
   renderCart();
-  openSheet("cart");
+  navPush("cart");
 });
 
 function renderCart() {
@@ -223,18 +259,38 @@ function renderCart() {
         <img src="${l.photo}" alt="" />
         <div class="cl-info">
           <div class="cl-name">${l.name}</div>
-          <div class="cl-variant">${l.variantLabel} · ×${l.quantity}</div>
+          <div class="cl-variant">${l.variantLabel}</div>
+          <div class="cl-qty">
+            <button class="qty-btn qty-btn-sm" data-dec="${i}" aria-label="Меньше">−</button>
+            <span class="cl-qty-val">${l.quantity}</span>
+            <button class="qty-btn qty-btn-sm" data-inc="${i}" aria-label="Больше">+</button>
+          </div>
         </div>
         <div class="cl-price">${money(l.price * l.quantity)}</div>
         <button class="btn-icon" data-remove="${i}" aria-label="Убрать">✕</button>
       </div>`
       )
       .join("");
+    const rerender = () => { renderCart(); updateCartBar(); };
     wrap.querySelectorAll("[data-remove]").forEach((btn) =>
       btn.addEventListener("click", () => {
         state.cart.splice(Number(btn.dataset.remove), 1);
-        renderCart();
-        updateCartBar();
+        rerender();
+      })
+    );
+    wrap.querySelectorAll("[data-inc]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        state.cart[Number(btn.dataset.inc)].quantity += 1;
+        tg.HapticFeedback?.selectionChanged?.();
+        rerender();
+      })
+    );
+    wrap.querySelectorAll("[data-dec]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const line = state.cart[Number(btn.dataset.dec)];
+        line.quantity = Math.max(1, line.quantity - 1);
+        tg.HapticFeedback?.selectionChanged?.();
+        rerender();
       })
     );
   }
@@ -243,9 +299,8 @@ function renderCart() {
 
 el("to-checkout-btn").addEventListener("click", () => {
   if (!state.cart.length) return;
-  closeSheet("cart");
   el("checkout-total").innerHTML = `<span>К оплате</span><span>${money(cartTotal())}</span>`;
-  openSheet("checkout");
+  navPush("checkout"); // корзина остаётся в истории — «назад» вернёт к ней
 });
 
 // ---------------------------------------------------------------------
@@ -295,9 +350,9 @@ el("checkout-form").addEventListener("submit", async (e) => {
     const order = await apiFetch("/api/orders", { method: "POST", body: payload, tg });
     state.cart = [];
     updateCartBar();
-    closeSheet("checkout");
+    navReset(); // заказ оформлен, корзина пуста — «назад» из подтверждения ведёт в каталог
     renderConfirmation(order);
-    openSheet("confirm");
+    navPush("confirm");
     tg.HapticFeedback?.notificationOccurred("success");
   } catch (err) {
     showToast(err.data?.error === "unauthorized" ? "Откройте приложение через Telegram, чтобы оформить заказ" : "Не получилось оформить заказ, попробуйте ещё раз");
@@ -335,7 +390,7 @@ function renderConfirmation(order) {
     ${bloomProgressHtml(order.status)}
     <button class="btn btn-secondary btn-block" style="margin-top:22px;" data-close="confirm">Готово</button>
   `;
-  el("confirm-content").querySelector("[data-close]").addEventListener("click", () => closeSheet("confirm"));
+  el("confirm-content").querySelector("[data-close]").addEventListener("click", navBack);
 }
 
 // ---------------------------------------------------------------------
