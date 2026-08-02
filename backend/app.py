@@ -85,6 +85,7 @@ def bootstrap():
     # Миграции для уже задеплоенной БД: добавляем новые колонки, если их ещё нет
     # (CREATE TABLE IF NOT EXISTS не меняет существующие таблицы). Идемпотентно.
     _add_column_if_missing(conn, "products", "is_addon", "INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing(conn, "products", "badge", "TEXT NOT NULL DEFAULT ''")
     _add_column_if_missing(conn, "orders", "delivery_zone", "TEXT")
     _add_column_if_missing(conn, "orders", "delivery_fee", "REAL NOT NULL DEFAULT 0")
 
@@ -599,6 +600,14 @@ def api_categories():
     return jsonify(rows)
 
 
+ALLOWED_BADGES = {"", "new", "hit", "recommended"}
+
+
+def _clean_badge(value):
+    v = (value or "").strip()
+    return v if v in ALLOWED_BADGES else ""
+
+
 def _product_with_variants(conn, product_row):
     p = dict(product_row)
     variants = conn.execute(
@@ -606,6 +615,16 @@ def _product_with_variants(conn, product_row):
     ).fetchall()
     p["variants"] = [dict(v) for v in variants]
     p["occasion_tags"] = [t for t in (p.get("occasion_tags") or "").split(",") if t]
+    # Популярность: лайки (кол-во добавивших в избранное) и число заказов
+    # (сколько заказов включали товар, кроме отменённых). Показываем на карточке.
+    p["likes"] = conn.execute(
+        "SELECT COUNT(*) c FROM favorites WHERE product_id = ?", (p["id"],)
+    ).fetchone()["c"]
+    p["order_count"] = conn.execute(
+        "SELECT COUNT(DISTINCT o.id) c FROM order_items oi JOIN orders o ON o.id = oi.order_id "
+        "WHERE oi.product_id = ? AND o.status != 'cancelled'", (p["id"],)
+    ).fetchone()["c"]
+    p["badge"] = p.get("badge") or ""
     return p
 
 
@@ -651,6 +670,48 @@ def api_product_detail(product_id):
     result = _product_with_variants(conn, row)
     conn.close()
     return jsonify(result)
+
+
+# --------------------------------------------------------------------------
+# Избранное / лайки. Хранится на сервере по tg_id — переживает смену
+# устройства, а число лайков товара = сколько пользователей его добавили.
+# --------------------------------------------------------------------------
+@app.route("/api/favorites")
+@require_auth
+def api_favorites():
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT product_id FROM favorites WHERE tg_id = ?", (str(g.tg_user["id"]),)
+    ).fetchall()
+    conn.close()
+    return jsonify([r["product_id"] for r in rows])
+
+
+@app.route("/api/favorites/<int:product_id>", methods=["POST"])
+@require_auth
+def api_favorite_toggle(product_id):
+    tg_id = str(g.tg_user["id"])
+    conn = get_db()
+    exists = conn.execute(
+        "SELECT 1 FROM favorites WHERE tg_id = ? AND product_id = ?", (tg_id, product_id)
+    ).fetchone()
+    if exists:
+        conn.execute(
+            "DELETE FROM favorites WHERE tg_id = ? AND product_id = ?", (tg_id, product_id)
+        )
+        liked = False
+    else:
+        # INSERT OR IGNORE на случай гонки/повторного тапа (UNIQUE tg_id+product_id)
+        conn.execute(
+            "INSERT OR IGNORE INTO favorites (tg_id, product_id) VALUES (?, ?)", (tg_id, product_id)
+        )
+        liked = True
+    conn.commit()
+    likes = conn.execute(
+        "SELECT COUNT(*) c FROM favorites WHERE product_id = ?", (product_id,)
+    ).fetchone()["c"]
+    conn.close()
+    return jsonify({"liked": liked, "likes": likes})
 
 
 # --------------------------------------------------------------------------
@@ -824,13 +885,13 @@ def api_admin_products():
         body = request.get_json(force=True)
         cur = conn.execute(
             "INSERT INTO products (location_id, category_id, name, description, composition, "
-            "photo_url, status, occasion_tags, is_addon) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "photo_url, status, occasion_tags, is_addon, badge) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 body["location_id"], body["category_id"], body["name"],
                 body.get("description", ""), body.get("composition", ""),
                 body.get("photo_url", "/static/img/placeholder.svg"),
                 body.get("status", "in_stock"), ",".join(body.get("occasion_tags", [])),
-                1 if body.get("is_addon") else 0,
+                1 if body.get("is_addon") else 0, _clean_badge(body.get("badge")),
             ),
         )
         product_id = cur.lastrowid
@@ -875,6 +936,7 @@ def api_admin_product_edit(product_id):
         "status": body.get("status", "in_stock"),
         "occasion_tags": ",".join(body.get("occasion_tags", [])),
         "is_addon": 1 if body.get("is_addon") else 0,
+        "badge": _clean_badge(body.get("badge")),
     }
     if body.get("photo_url"):
         fields["photo_url"] = body["photo_url"]

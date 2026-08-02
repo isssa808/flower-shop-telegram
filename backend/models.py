@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS products (
     status TEXT NOT NULL DEFAULT 'in_stock',   -- in_stock | made_to_order | hidden
     occasion_tags TEXT,                          -- через запятую
     is_addon INTEGER NOT NULL DEFAULT 0,         -- 1 = показывать в «Добавьте к заказу»
+    badge TEXT NOT NULL DEFAULT '',              -- '' | new | hit | recommended
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -122,6 +123,14 @@ CREATE TABLE IF NOT EXISTS order_items (
 CREATE TABLE IF NOT EXISTS app_settings (
     key TEXT PRIMARY KEY,
     value TEXT
+);
+
+CREATE TABLE IF NOT EXISTS favorites (
+    id INTEGER PRIMARY KEY,
+    tg_id TEXT NOT NULL,
+    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(tg_id, product_id)
 );
 """
 
