@@ -28,17 +28,31 @@ function showToast(msg) {
   t.classList.add("visible");
   setTimeout(() => t.classList.remove("visible"), 2200);
 }
+// Стек открытых шторок + системная кнопка Telegram «Назад»: пока открыта хоть
+// одна шторка, показываем «Назад» (она закрывает верхнюю). Плюс видимый ✕ в
+// каждой шторке (data-close) — чтобы выход был очевиден.
+const sheetStack = [];
 function openSheet(name) {
   el(`${name}-backdrop`).classList.add("open");
   el(`${name}-sheet`).classList.add("open");
+  if (!sheetStack.includes(name)) sheetStack.push(name);
+  tg.BackButton?.show?.();
 }
 function closeSheet(name) {
   el(`${name}-backdrop`).classList.remove("open");
   el(`${name}-sheet`).classList.remove("open");
+  const i = sheetStack.lastIndexOf(name);
+  if (i >= 0) sheetStack.splice(i, 1);
+  if (!sheetStack.length) tg.BackButton?.hide?.();
 }
 document.querySelectorAll("[data-close]").forEach((b) =>
   b.addEventListener("click", () => closeSheet(b.dataset.close))
 );
+tg.BackButton?.onClick?.(() => {
+  const top = sheetStack[sheetStack.length - 1];
+  if (top) closeSheet(top);
+});
+tg.BackButton?.hide?.();
 
 function roleLabel(role) {
   return { owner: "владелец", florist: "флорист", courier: "курьер" }[role] || role;
