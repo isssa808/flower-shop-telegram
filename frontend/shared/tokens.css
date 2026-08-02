@@ -1,28 +1,33 @@
 @import url("https://fonts.googleapis.com/css2?family=Unbounded:wght@500;600;700&family=Manrope:wght@400;500;600;700&display=swap");
 
 :root {
-  /* --- цвет: черноморский тёмный бирюзовый + тёплая малина, вместо
-     дежурного пастельно-розового «цветочного» набора --- */
-  --ink: #1c2b27;
-  --ink-muted: #5b6b64;
-  --bg: #fbf6ec;
-  --surface: #f2e9d8;
-  --surface-2: #ffffff;
-  --petrol: #0f3b36;
-  --petrol-2: #164943;
-  --rose: #d6335c;
-  --rose-dark: #b21f47;
-  --leaf: #4c7a5a;
-  --border: #e3d8c2;
-  --danger: #c23b3b;
+  /* --- цвет: чистый белый + тёплый графит, мягкий красно-розовый акцент,
+     зелёный как фирменная деталь (по мотивам bloomflowers, «меньше
+     контраста, лаконичнее») --- */
+  --ink: #221F1C;
+  --ink-muted: #7A716A;
+  --faint: #B7AEA4;
+  --bg: #FCFAF7;
+  --surface: #F4EFE7;
+  --surface-2: #FFFFFF;
+  --petrol: #33574A;      /* фирменный зелёный (акценты, шапка админки) */
+  --petrol-2: #3E6656;
+  --rose: #C24A5E;        /* основной акцент */
+  --rose-dark: #A83A4D;
+  --rose-soft: rgba(194, 74, 94, 0.10);
+  --leaf: #4C7A5A;
+  --green-soft: rgba(51, 87, 74, 0.10);
+  --border: #ECE6DE;
+  --danger: #C23B3B;
 
   --radius-s: 10px;
   --radius-m: 16px;
   --radius-l: 24px;
-  --shadow: 0 8px 24px rgba(15, 59, 54, 0.12);
+  --shadow: 0 12px 30px -14px rgba(40, 30, 20, 0.22);
 
   --font-display: "Unbounded", "Manrope", sans-serif;
   --font-body: "Manrope", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-brand: Georgia, "Times New Roman", serif;
 
   /* Безопасные отступы Telegram в полноэкранном режиме (задаются из JS,
      см. initFullscreen в shared/telegram.js). Дефолт 0 — вне fullscreen. */
@@ -30,6 +35,45 @@
   --tg-safe-bottom: 0px;
   --tg-safe-left: 0px;
   --tg-safe-right: 0px;
+}
+
+/* Тёмная тема: уважаем системную настройку и ручной оверрайд data-theme.
+   Полноценный переключатель добавится в Профиле (Этап 4). */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ink: #F1EBE1;
+    --ink-muted: #9C9285;
+    --faint: #6F665B;
+    --bg: #17150F;
+    --surface: #221E17;
+    --surface-2: #211D17;
+    --rose: #E0788A;
+    --rose-dark: #EC8A9B;
+    --rose-soft: rgba(224, 120, 138, 0.14);
+    --petrol: #7FB29C;
+    --petrol-2: #8FBFAA;
+    --leaf: #7FB29C;
+    --green-soft: rgba(127, 178, 156, 0.14);
+    --border: #322C24;
+    --shadow: 0 14px 34px -16px rgba(0, 0, 0, 0.7);
+  }
+}
+:root[data-theme="dark"] {
+  --ink: #F1EBE1;
+  --ink-muted: #9C9285;
+  --faint: #6F665B;
+  --bg: #17150F;
+  --surface: #221E17;
+  --surface-2: #211D17;
+  --rose: #E0788A;
+  --rose-dark: #EC8A9B;
+  --rose-soft: rgba(224, 120, 138, 0.14);
+  --petrol: #7FB29C;
+  --petrol-2: #8FBFAA;
+  --leaf: #7FB29C;
+  --green-soft: rgba(127, 178, 156, 0.14);
+  --border: #322C24;
+  --shadow: 0 14px 34px -16px rgba(0, 0, 0, 0.7);
 }
 
 * { box-sizing: border-box; }

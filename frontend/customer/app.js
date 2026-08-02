@@ -8,8 +8,12 @@ const LOCATION_ID = 1;
 const state = {
   categories: [],
   products: [],
+  allProducts: null, // кэш полного каталога (для избранного)
   activeCategory: null,
   search: "",
+  view: "catalog", // catalog | favorites
+  favorites: new Set(),
+  theme: "system", // light | dark | system
   cart: [], // { productId, name, photo, variantId, variantLabel, price, quantity }
   currentProduct: null,
   selectedVariantId: null,
@@ -112,28 +116,94 @@ function statusBadge(status) {
   return `<span class="badge badge-leaf">в наличии</span>`;
 }
 
-function renderProductGrid() {
+function findProduct(id) {
+  return (
+    state.products.find((x) => x.id === id) ||
+    (state.allProducts || []).find((x) => x.id === id) ||
+    null
+  );
+}
+
+function productCardHtml(p) {
+  const prices = p.variants.map((v) => v.price).filter((x) => x > 0);
+  const minPrice = prices.length ? Math.min(...prices) : null;
+  const priceLabel = minPrice
+    ? `<span class="pc-price"><small>от</small> ${money(minPrice)}</span>`
+    : `<span class="pc-price">по запросу</span>`;
+  const fav = state.favorites.has(p.id) ? " on" : "";
+  const tag = p.status === "made_to_order" ? `<span class="pc-tag made">Под заказ</span>` : "";
+  return `
+    <div class="product-card" data-product="${p.id}">
+      <div class="photo">
+        ${tag}
+        <button class="pc-heart${fav}" data-fav="${p.id}" type="button" aria-label="В избранное">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 21C12 21 4 14.5 4 8.8C4 5.9 6.2 4 8.6 4C10.2 4 11.4 4.9 12 6C12.6 4.9 13.8 4 15.4 4C17.8 4 20 5.9 20 8.8C20 14.5 12 21 12 21Z"/></svg>
+        </button>
+        <img src="${p.photo_url}" alt="${p.name}" loading="lazy" />
+      </div>
+      <div class="info">
+        <div class="pc-name">${p.name}</div>
+        <div class="pc-row">${priceLabel}<button class="pc-plus" data-add="${p.id}" type="button" aria-label="В корзину">+</button></div>
+      </div>
+    </div>`;
+}
+
+function renderProductGrid(list = state.products) {
   const grid = el("product-grid");
-  if (!state.products.length) {
-    grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1;"><div class="icon">🌾</div>Ничего не нашлось — попробуйте другой запрос</div>`;
+  if (!list.length) {
+    const msg =
+      state.view === "favorites"
+        ? "В избранном пока пусто — жмите ♥ на букетах"
+        : "Ничего не нашлось — попробуйте другой запрос";
+    grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1;"><div class="icon">🌾</div>${msg}</div>`;
     return;
   }
-  grid.innerHTML = "";
-  state.products.forEach((p) => {
-    const minPrice = Math.min(...p.variants.map((v) => v.price).filter((x) => x > 0), Infinity);
-    const priceLabel = Number.isFinite(minPrice) ? `от ${money(minPrice)}` : "по запросу";
-    const card = document.createElement("div");
-    card.className = "product-card";
-    card.innerHTML = `
-      <div class="photo"><img src="${p.photo_url}" alt="${p.name}" loading="lazy" /></div>
-      <div class="info">
-        <div class="name">${p.name}</div>
-        <div class="price">${priceLabel}</div>
-        <div class="status-row">${statusBadge(p.status)}</div>
-      </div>`;
-    card.addEventListener("click", () => openProduct(p));
-    grid.appendChild(card);
-  });
+  grid.innerHTML = list.map(productCardHtml).join("");
+  grid.querySelectorAll("[data-product]").forEach((card) =>
+    card.addEventListener("click", (e) => {
+      if (e.target.closest("[data-fav]") || e.target.closest("[data-add]")) return;
+      const p = findProduct(Number(card.dataset.product));
+      if (p) openProduct(p);
+    })
+  );
+  grid.querySelectorAll("[data-fav]").forEach((b) =>
+    b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleFavorite(Number(b.dataset.fav), b);
+    })
+  );
+  grid.querySelectorAll("[data-add]").forEach((b) =>
+    b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      quickAdd(findProduct(Number(b.dataset.add)));
+    })
+  );
+}
+
+// Быстрое добавление с карточки: берём первый доступный вариант.
+function quickAdd(p) {
+  if (!p) return;
+  const variant = p.variants.find((v) => v.price > 0) || p.variants[0];
+  if (!variant) return;
+  const existing = state.cart.find((l) => l.variantId === variant.id);
+  if (existing) existing.quantity += 1;
+  else
+    state.cart.push({
+      productId: p.id, name: p.name, photo: p.photo_url,
+      variantId: variant.id, variantLabel: variant.label, price: variant.price, quantity: 1,
+    });
+  tg.HapticFeedback?.impactOccurred?.("light");
+  updateCartBar();
+  showToast("Добавлено в корзину");
+}
+
+function toggleFavorite(id, btnEl) {
+  if (state.favorites.has(id)) state.favorites.delete(id);
+  else state.favorites.add(id);
+  if (btnEl) btnEl.classList.toggle("on", state.favorites.has(id));
+  saveFavorites();
+  tg.HapticFeedback?.selectionChanged?.();
+  if (state.view === "favorites") showFavorites();
 }
 
 let searchTimer;
@@ -166,12 +236,18 @@ function renderProductSheet() {
     )
     .join("");
 
+  const prices = p.variants.map((v) => v.price).filter((x) => x > 0);
+  const leadPrice = prices.length ? `от ${money(Math.min(...prices))}` : "по запросу";
+
   el("product-sheet-content").innerHTML = `
     <div class="pd-photo"><img src="${p.photo_url}" alt="${p.name}" /></div>
     <h2 class="pd-title">${p.name}</h2>
+    <div class="pd-price-lead">${leadPrice}</div>
     ${p.description ? `<div class="pd-desc">${p.description}</div>` : ""}
     ${p.composition ? `<div class="pd-composition">Состав: ${p.composition}</div>` : ""}
+    <div class="pd-label">Размер</div>
     <div class="variant-row" id="variant-row">${variantsHtml}</div>
+    <div class="pd-label">Количество</div>
     <div class="qty-row">
       <button class="qty-btn" id="qty-minus">−</button>
       <span class="qty-value" id="qty-value">${state.selectedQty}</span>
@@ -233,11 +309,17 @@ function cartCount() {
 
 function updateCartBar() {
   const bar = el("cart-bar");
-  if (cartCount() === 0) {
+  const count = cartCount();
+  const badge = el("cart-nav-badge");
+  if (badge) {
+    if (count > 0) { badge.hidden = false; badge.textContent = count; }
+    else badge.hidden = true;
+  }
+  if (count === 0) {
     bar.classList.remove("visible");
     return;
   }
-  el("cart-summary").textContent = `${cartCount()} товар(а) · ${money(cartTotal())}`;
+  el("cart-summary").textContent = `${count} товар(а) · ${money(cartTotal())}`;
   bar.classList.add("visible");
 }
 
@@ -400,10 +482,10 @@ const ORDER_STATUS_LABEL = {
   out_for_delivery: "В пути", delivered: "Доставлен", cancelled: "Отменён",
 };
 
-el("my-orders-btn").addEventListener("click", async () => {
+async function openOrders() {
   navPush("orders");
   await loadMyOrders();
-});
+}
 
 async function loadMyOrders() {
   const list = el("orders-list");
@@ -510,9 +592,147 @@ async function repeatOrder(order) {
 }
 
 // ---------------------------------------------------------------------
+// Нижнее меню + вкладки (Каталог / Избранное / Корзина / Профиль)
+// ---------------------------------------------------------------------
+function setActiveTab(tab) {
+  document.querySelectorAll("#bottom-nav .nav-item").forEach((b) =>
+    b.classList.toggle("active", b.dataset.tab === tab)
+  );
+}
+
+function showCatalog() {
+  state.view = "catalog";
+  setActiveTab("catalog");
+  el("tabs").style.display = "";
+  el("grid-title").textContent = "Популярное";
+  renderProductGrid(state.products);
+}
+
+async function showFavorites() {
+  state.view = "favorites";
+  setActiveTab("favorites");
+  el("tabs").style.display = "none";
+  el("grid-title").textContent = "Избранное";
+  if (!state.allProducts) {
+    el("product-grid").innerHTML = `<div class="empty-state" style="grid-column:1/-1;">Загружаем…</div>`;
+    try {
+      state.allProducts = await apiFetch(`/api/products?location_id=${LOCATION_ID}`, { tg });
+    } catch (_) {
+      state.allProducts = [...state.products];
+    }
+  }
+  renderProductGrid(state.allProducts.filter((p) => state.favorites.has(p.id)));
+}
+
+document.querySelectorAll("#bottom-nav .nav-item").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const tab = btn.dataset.tab;
+    if (tab === "catalog") showCatalog();
+    else if (tab === "favorites") showFavorites();
+    else if (tab === "cart") { renderCart(); navPush("cart"); }
+    else if (tab === "profile") { renderProfile(); navPush("profile"); }
+  });
+});
+
+el("profile-avatar").addEventListener("click", () => { renderProfile(); navPush("profile"); });
+el("filter-btn").addEventListener("click", () => showToast("Фильтры добавим на следующем этапе"));
+
+// ---------------------------------------------------------------------
+// Избранное — хранение в Telegram CloudStorage (синхронно между устройствами)
+// ---------------------------------------------------------------------
+function saveFavorites() {
+  try { tg.CloudStorage?.setItem?.("favorites", JSON.stringify([...state.favorites])); } catch (_) {}
+}
+function loadFavorites() {
+  return new Promise((resolve) => {
+    const cs = tg.CloudStorage;
+    if (!cs || !cs.getItem) return resolve();
+    try {
+      cs.getItem("favorites", (err, val) => {
+        if (!err && val) {
+          try { JSON.parse(val).forEach((id) => state.favorites.add(Number(id))); } catch (_) {}
+        }
+        resolve();
+      });
+    } catch (_) { resolve(); }
+  });
+}
+
+// ---------------------------------------------------------------------
+// Тема (светлая / тёмная / как в системе)
+// ---------------------------------------------------------------------
+function applyTheme(theme) {
+  const root = document.documentElement;
+  if (theme === "light" || theme === "dark") root.setAttribute("data-theme", theme);
+  else root.removeAttribute("data-theme");
+}
+function setTheme(theme) {
+  state.theme = theme;
+  applyTheme(theme);
+  try { tg.CloudStorage?.setItem?.("theme", theme); } catch (_) {}
+}
+function loadTheme() {
+  return new Promise((resolve) => {
+    const cs = tg.CloudStorage;
+    if (!cs || !cs.getItem) { applyTheme("system"); return resolve(); }
+    try {
+      cs.getItem("theme", (err, val) => {
+        state.theme = !err && val ? val : "system";
+        applyTheme(state.theme);
+        resolve();
+      });
+    } catch (_) { applyTheme("system"); resolve(); }
+  });
+}
+
+// ---------------------------------------------------------------------
+// Профиль (история заказов + настройки; язык и валюта — Этап 4)
+// ---------------------------------------------------------------------
+function renderProfile() {
+  const u = tg.initDataUnsafe?.user;
+  const name = u?.first_name ? `${u.first_name}${u.last_name ? " " + u.last_name : ""}` : "Гость";
+  const t = state.theme || "system";
+  el("profile-content").innerHTML = `
+    <div class="profile-head">
+      <div class="profile-avatar-lg"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 5-5 8-5s6.5 1 8 5"/></svg></div>
+      <div>
+        <div class="profile-name">${name}</div>
+        <div class="profile-hint">Flowers Batum Flower · Батуми</div>
+      </div>
+    </div>
+    <div class="profile-menu">
+      <button class="pm-item" id="pm-orders" type="button"><span>🌸 Мои заказы</span><span class="pm-val">смотреть ›</span></button>
+      <div class="pm-block">
+        <div class="pm-block-title">Оформление</div>
+        <div class="pm-block-row">
+          <span>Тема</span>
+          <div class="pm-seg" id="pm-theme">
+            <button class="pm-seg-btn ${t === "light" ? "active" : ""}" data-theme="light" type="button">Светлая</button>
+            <button class="pm-seg-btn ${t === "dark" ? "active" : ""}" data-theme="dark" type="button">Тёмная</button>
+            <button class="pm-seg-btn ${t === "system" ? "active" : ""}" data-theme="system" type="button">Как в системе</button>
+          </div>
+        </div>
+      </div>
+      <div class="pm-block">
+        <div class="pm-block-row"><span>Язык</span><span class="pm-val">Русский <span class="pm-soon">скоро</span></span></div>
+      </div>
+      <div class="pm-block">
+        <div class="pm-block-row"><span>Валюта</span><span class="pm-val">₾ лари <span class="pm-soon">скоро</span></span></div>
+      </div>
+    </div>
+  `;
+  el("pm-orders").addEventListener("click", openOrders);
+  el("profile-content").querySelectorAll("#pm-theme .pm-seg-btn").forEach((b) =>
+    b.addEventListener("click", () => { setTheme(b.dataset.theme); renderProfile(); })
+  );
+}
+
+// ---------------------------------------------------------------------
 init();
 async function init() {
   try {
+    await loadTheme();
+    await loadFavorites();
     await loadCategories();
     await loadProducts();
   } catch (err) {

@@ -10,27 +10,65 @@
 </head>
 <body>
   <div class="app" id="app">
-    <header class="topbar">
-      <button class="orders-link" id="my-orders-btn" type="button">Мои заказы</button>
-      <div class="eyebrow">Flowers Batum Flower · Батуми</div>
-      <h1>Свежие букеты<br />с доставкой сегодня</h1>
+    <header class="shop-header">
+      <div class="brand-row">
+        <img class="shop-logo" src="/shared/img/logo.png" alt="Flowers Batum Flower" />
+        <div class="brand">
+          <span class="brand-name">Flowers Batum Flower</span>
+          <span class="brand-loc"><span class="dot"></span> Батуми · доставка сегодня</span>
+        </div>
+      </div>
+      <button class="avatar-btn" id="profile-avatar" type="button" aria-label="Профиль">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 5-5 8-5s6.5 1 8 5"/></svg>
+      </button>
     </header>
 
-    <nav class="tabs" id="tabs"><!-- категории рендерятся из JS --></nav>
-
     <div class="search-wrap">
+      <svg class="search-ic" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg>
       <input type="search" id="search-input" placeholder="Искать букет, повод, цветок…" />
     </div>
 
+    <nav class="tabs" id="tabs"><!-- категории рендерятся из JS --></nav>
+
+    <div class="sec-head">
+      <h2 id="grid-title">Популярное</h2>
+      <button class="filter-btn" id="filter-btn" type="button">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 5h18M6 12h12M10 19h4"/></svg>
+        Фильтры
+      </button>
+    </div>
+
     <main class="product-grid" id="product-grid">
-      <div class="empty-state">Загружаем каталог…</div>
+      <div class="empty-state" style="grid-column:1/-1;">Загружаем каталог…</div>
     </main>
   </div>
 
+  <!-- Плавающая панель корзины (над нижним меню) -->
   <div class="cart-bar" id="cart-bar">
     <span id="cart-summary">Корзина пуста</span>
     <span class="cart-arrow">Оформить →</span>
   </div>
+
+  <!-- Нижнее меню -->
+  <nav class="bottom-nav" id="bottom-nav">
+    <button class="nav-item active" data-tab="catalog" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/></svg>
+      <span>Каталог</span>
+    </button>
+    <button class="nav-item" data-tab="favorites" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 21C12 21 4 14.5 4 8.8C4 5.9 6.2 4 8.6 4C10.2 4 11.4 4.9 12 6C12.6 4.9 13.8 4 15.4 4C17.8 4 20 5.9 20 8.8C20 14.5 12 21 12 21Z"/></svg>
+      <span>Избранное</span>
+    </button>
+    <button class="nav-item" data-tab="cart" type="button">
+      <span class="nav-badge" id="cart-nav-badge" hidden>0</span>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16l-1.5 11.5a2 2 0 0 1-2 1.7H7.5a2 2 0 0 1-2-1.7L4 6z"/><path d="M9 6a3 3 0 0 1 6 0"/></svg>
+      <span>Корзина</span>
+    </button>
+    <button class="nav-item" data-tab="profile" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 5-5 8-5s6.5 1 8 5"/></svg>
+      <span>Профиль</span>
+    </button>
+  </nav>
 
   <!-- Карточка товара -->
   <div class="sheet-backdrop" id="product-backdrop" data-close="product"></div>
@@ -126,6 +164,13 @@
   <div class="sheet" id="confirm-sheet">
     <div class="sheet-handle"></div>
     <div id="confirm-content"></div>
+  </div>
+
+  <!-- Профиль -->
+  <div class="sheet-backdrop" id="profile-backdrop" data-close="profile"></div>
+  <div class="sheet" id="profile-sheet">
+    <div class="sheet-handle"></div>
+    <div id="profile-content"></div>
   </div>
 
   <!-- Мои заказы -->
