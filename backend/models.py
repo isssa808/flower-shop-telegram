@@ -79,6 +79,17 @@ CREATE TABLE IF NOT EXISTS product_recipe (
     quantity_needed REAL NOT NULL
 );
 
+-- Рецепт по размерам с заменами. Строка = ЛИБО конкретный цветок (flower_stock_id),
+-- ЛИБО группа/тип (flower_type, любой цвет внутри) + количество в штуках.
+CREATE TABLE IF NOT EXISTS recipe_lines (
+    id INTEGER PRIMARY KEY,
+    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    variant_id INTEGER REFERENCES product_variants(id) ON DELETE CASCADE,
+    flower_stock_id INTEGER REFERENCES flower_stock(id),
+    flower_type TEXT,
+    quantity_needed REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS staff (
     id INTEGER PRIMARY KEY,
     telegram_id TEXT UNIQUE NOT NULL,

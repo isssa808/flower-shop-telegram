@@ -98,6 +98,11 @@ def bootstrap():
     _add_column_if_missing(conn, "orders", "stock_returned", "INTEGER NOT NULL DEFAULT 0")
     _add_column_if_missing(conn, "orders", "stale_reminded", "INTEGER NOT NULL DEFAULT 0")
     _add_column_if_missing(conn, "orders", "slot_reminded", "INTEGER NOT NULL DEFAULT 0")
+    # Склад: группа/тип, размер пачки по умолчанию, фото; вариант в позиции заказа.
+    _add_column_if_missing(conn, "flower_stock", "flower_type", "TEXT")
+    _add_column_if_missing(conn, "flower_stock", "pack_size", "REAL NOT NULL DEFAULT 0")
+    _add_column_if_missing(conn, "flower_stock", "photo_url", "TEXT")
+    _add_column_if_missing(conn, "order_items", "variant_id", "INTEGER")
 
     # Разовая зачистка файла-метки, оставшегося после диагностики персистентности.
     try:
@@ -1448,12 +1453,13 @@ def api_admin_stock():
     if request.method == "POST":
         body = request.get_json(force=True)
         cur = conn.execute(
-            "INSERT INTO flower_stock (location_id, name, unit, quantity, low_stock_threshold, supplier) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO flower_stock (location_id, name, flower_type, unit, quantity, low_stock_threshold, supplier, pack_size) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                body["location_id"], body["name"], body.get("unit", "шт"),
-                body.get("quantity", 0), body.get("low_stock_threshold", 10),
-                body.get("supplier", ""),
+                body["location_id"], body["name"], body.get("flower_type", ""),
+                body.get("unit", "шт"), body.get("quantity", 0),
+                body.get("low_stock_threshold", 10), body.get("supplier", ""),
+                body.get("pack_size", 0),
             ),
         )
         conn.commit()
@@ -1506,6 +1512,93 @@ def api_admin_stock_writeoff(stock_id):
     if updated is None:
         return jsonify({"error": "not found"}), 404
     return jsonify(updated)
+
+
+@app.route("/api/admin/stock/<int:stock_id>", methods=["PUT", "DELETE"])
+@require_owner
+def api_admin_stock_edit(stock_id):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM flower_stock WHERE id=?", (stock_id,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "not found"}), 404
+    if request.method == "DELETE":
+        used = conn.execute("SELECT COUNT(*) c FROM recipe_lines WHERE flower_stock_id=?", (stock_id,)).fetchone()["c"]
+        used += conn.execute("SELECT COUNT(*) c FROM product_recipe WHERE flower_stock_id=?", (stock_id,)).fetchone()["c"]
+        if used:
+            conn.close()
+            return jsonify({"error": "in use", "detail": "Цветок используется в рецептах — сначала уберите его из букетов"}), 400
+        conn.execute("DELETE FROM stock_movements WHERE flower_stock_id=?", (stock_id,))
+        conn.execute("DELETE FROM flower_stock WHERE id=?", (stock_id,))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    body = request.get_json(force=True)
+    # Частичный апдейт: только переданные поля; ключи — фиксированные литералы.
+    fields = {}
+    for k in ("name", "flower_type", "unit", "supplier"):
+        if k in body:
+            fields[k] = body[k]
+    for k in ("low_stock_threshold", "pack_size"):
+        if k in body:
+            fields[k] = float(body[k])
+    if fields:
+        sets = ", ".join(f"{k}=?" for k in fields)
+        conn.execute(f"UPDATE flower_stock SET {sets} WHERE id=?", (*fields.values(), stock_id))
+        conn.commit()
+    updated = conn.execute("SELECT * FROM flower_stock WHERE id=?", (stock_id,)).fetchone()
+    conn.close()
+    return jsonify(dict(updated))
+
+
+@app.route("/api/admin/stock/<int:stock_id>/photo", methods=["POST"])
+@require_owner
+def api_admin_stock_photo(stock_id):
+    if "photo" not in request.files:
+        return jsonify({"error": "no file"}), 400
+    f = request.files["photo"]
+    ext = os.path.splitext(f.filename or "")[1].lower()
+    if ext not in ALLOWED_PHOTO_EXTS:
+        return jsonify({"error": "unsupported file type", "detail": "только изображ: jpg, png, webp, gif"}), 400
+    filename = f"flower_{stock_id}{ext}"
+    f.save(os.path.join(UPLOAD_DIR, filename))
+    url = f"/static/uploads/{filename}?v={int(time.time())}"
+    conn = get_db()
+    conn.execute("UPDATE flower_stock SET photo_url=? WHERE id=?", (url, stock_id))
+    conn.commit()
+    conn.close()
+    return jsonify({"photo_url": url})
+
+
+@app.route("/api/admin/stock/intake", methods=["POST"])
+@require_owner
+def api_admin_stock_intake():
+    """Массовая приёмка. items: [{flower_id, batches:[{packs,pack_size}], extra_stems,
+    direct_stems, note}]. Итог штук = сумма(packs*pack_size) + extra_stems + direct_stems."""
+    body = request.get_json(force=True)
+    items = body.get("items") or []
+    conn = get_db()
+    applied = []
+    for it in items:
+        stock_id = it.get("flower_id")
+        if not stock_id or not conn.execute("SELECT 1 FROM flower_stock WHERE id=?", (stock_id,)).fetchone():
+            continue
+        stems = 0.0
+        for b in (it.get("batches") or []):
+            stems += float(b.get("packs", 0) or 0) * float(b.get("pack_size", 0) or 0)
+        stems += float(it.get("extra_stems", 0) or 0)
+        stems += float(it.get("direct_stems", 0) or 0)
+        if stems <= 0:
+            continue
+        conn.execute("UPDATE flower_stock SET quantity = quantity + ? WHERE id=?", (stems, stock_id))
+        conn.execute(
+            "INSERT INTO stock_movements (flower_stock_id, movement_type, quantity, note) VALUES (?, 'income', ?, ?)",
+            (stock_id, stems, it.get("note") or "приёмка"),
+        )
+        applied.append({"flower_id": stock_id, "added": stems})
+    conn.commit()
+    conn.close()
+    return jsonify({"applied": applied})
 
 
 # --------------------------------------------------------------------------
