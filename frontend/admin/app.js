@@ -296,6 +296,12 @@ async function loadProducts() {
   state.products = await apiFetch(`/api/admin/products?location_id=${LOCATION_ID}`, { tg });
 }
 
+function productHasStock(p) {
+  if (p.track_stock) return true;
+  if ((p.recipe || []).length) return true;
+  return (p.variants || []).some((v) => (v.recipe || []).length);
+}
+
 function renderCatalog() {
   const wrap = el("catalog-list");
   if (!state.products.length) {
@@ -309,7 +315,7 @@ function renderCatalog() {
       <img src="${p.photo_url}" alt=""/>
       <div class="cr-info">
         <div class="cr-name">${p.name}${badgeRu(p.badge) ? ` <span class="badge badge-rose">${badgeRu(p.badge)}</span>` : ""}</div>
-        <div class="cr-meta">${p.variants.map((v) => money(v.price)).join(" / ") || "без цены"} · ${statusLabelRu(p.status)}</div>
+        <div class="cr-meta">${p.variants.map((v) => money(v.price)).join(" / ") || "без цены"} · ${statusLabelRu(p.status)}${productHasStock(p) ? "" : ` · <span class="cr-nostock">без склада</span>`}</div>
         <div class="cr-meta">♥ ${p.likes || 0} · заказов ${p.order_count || 0}</div>
       </div>
       <div class="cr-actions">
@@ -381,11 +387,11 @@ function flowerOptionsHtml(selValue) {
   const stock = state.stock || [];
   const groups = [...new Set(stock.map((s) => (s.flower_type || "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b, "ru"));
   const flowers = [...stock].sort((a, b) => (a.name || "").localeCompare(b.name || "", "ru"));
-  let opts = `<option value="">— выберите цветок/группу —</option>`;
+  let opts = `<option value="">— выберите позицию/группу —</option>`;
   if (groups.length) {
     opts += `<optgroup label="Группы (замена)">` + groups.map((g) => `<option value="g:${_q(g)}" ${selValue === `g:${g}` ? "selected" : ""}>Группа: ${g}</option>`).join("") + `</optgroup>`;
   }
-  opts += `<optgroup label="Цветы">` + flowers.map((f) => `<option value="f:${f.id}" ${selValue === `f:${f.id}` ? "selected" : ""}>${f.name}</option>`).join("") + `</optgroup>`;
+  opts += `<optgroup label="Позиции склада">` + flowers.map((f) => `<option value="f:${f.id}" ${selValue === `f:${f.id}` ? "selected" : ""}>${f.name}</option>`).join("") + `</optgroup>`;
   return opts;
 }
 
@@ -430,10 +436,15 @@ async function openProductEdit(productId) {
         </select>
       </div>
       <div class="field"><label>Повод (через запятую)</label><input name="occasion_tags" value="${(p?.occasion_tags || []).join(", ")}"/></div>
-      <label class="checkbox-row" style="margin:2px 0 14px;">
+      <label class="checkbox-row" style="margin:2px 0 8px;">
         <input type="checkbox" name="is_addon" ${p?.is_addon ? "checked" : ""}/>
         <span>Показывать как доп-товар («Добавьте к заказу»)</span>
       </label>
+      <label class="checkbox-row" style="margin:2px 0 8px;">
+        <input type="checkbox" name="track_stock" id="track-stock-toggle" ${p?.track_stock ? "checked" : ""}/>
+        <span>Штучный товар — свой остаток (шары, вазы, сладости)</span>
+      </label>
+      <div class="field" id="simple-stock-field" style="display:none;"><label>Остаток на складе (шт)</label><input name="stock_qty" type="number" step="1" min="0" value="${p?.stock_qty ?? 0}"/></div>
       <div class="field"><label>Фото</label><input type="file" name="photo" accept="image/*"/></div>
       <div class="field">
         <label>Размеры, цены и рецепт (для склада)</label>
@@ -486,7 +497,15 @@ async function openProductEdit(productId) {
     variantEditor.appendChild(row);
   }
   variants.forEach((v) => addVariantRow(v));
-  el("add-variant-row").addEventListener("click", () => addVariantRow());
+  const trackToggle = el("track-stock-toggle");
+  function applyTrackMode() {
+    const on = trackToggle.checked;
+    el("simple-stock-field").style.display = on ? "" : "none";
+    variantEditor.querySelectorAll(".ver-recipe").forEach((r) => { r.style.display = on ? "none" : ""; });
+  }
+  trackToggle.addEventListener("change", applyTrackMode);
+  el("add-variant-row").addEventListener("click", () => { addVariantRow(); applyTrackMode(); });
+  applyTrackMode();
   document.querySelectorAll("#product-edit-content [data-close]").forEach((b) => b.addEventListener("click", () => closeSheet("product-edit")));
   el("preview-product").addEventListener("click", () => previewProduct(formToProduct(variantEditor, p)));
 
@@ -518,6 +537,8 @@ async function openProductEdit(productId) {
       occasion_tags: fd.get("occasion_tags").split(",").map((s) => s.trim()).filter(Boolean),
       is_addon: fd.get("is_addon") ? 1 : 0,
       badge: fd.get("badge") || "",
+      track_stock: fd.get("track_stock") ? 1 : 0,
+      stock_qty: parseFloat(fd.get("stock_qty")) || 0,
       variants: variantRows,
     };
 

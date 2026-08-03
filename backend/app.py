@@ -103,6 +103,9 @@ def bootstrap():
     _add_column_if_missing(conn, "flower_stock", "pack_size", "REAL NOT NULL DEFAULT 0")
     _add_column_if_missing(conn, "flower_stock", "photo_url", "TEXT")
     _add_column_if_missing(conn, "order_items", "variant_id", "INTEGER")
+    # Штучные товары (шары/вазы/сладости): свой остаток вместо рецепта из цветов.
+    _add_column_if_missing(conn, "products", "track_stock", "INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing(conn, "products", "stock_qty", "REAL NOT NULL DEFAULT 0")
     # Разовый перенос старых product_recipe → recipe_lines (на товар целиком), если пусто.
     if not conn.execute("SELECT 1 FROM recipe_lines LIMIT 1").fetchone():
         for r in conn.execute("SELECT product_id, flower_stock_id, quantity_needed FROM product_recipe").fetchall():
@@ -1029,7 +1032,13 @@ def _product_with_variants(conn, product_row, levels=None):
         vlist.append(vd)
     p["variants"] = vlist
     p["recipe"] = [dict(l) for l in prod_lines]     # рецепт на товар целиком (если задан)
-    if vlist:
+    # Приоритет: штучный товар (свой остаток) → рецепт из цветов → без учёта (всегда доступен).
+    if p.get("track_stock"):
+        avail = (p.get("stock_qty") or 0) > 0
+        for vd in vlist:
+            vd["available"] = avail
+        p["available"] = avail
+    elif vlist:
         p["available"] = (any_avail if any_recipe else True)
     else:
         p["available"] = (_variant_available(prod_lines, per, grp) if prod_lines else True)
@@ -1211,9 +1220,12 @@ def api_create_order():
 
     items_total = 0
     resolved_items = []
+    simple_need = {}   # штучные товары: product_id -> суммарное кол-во в заказе
+    simple_info = {}   # product_id -> {"name", "stock"}
     for it in items:
         variant = cur.execute(
-            "SELECT pv.id AS variant_id, pv.price, pv.label, p.name, p.id as product_id FROM product_variants pv "
+            "SELECT pv.id AS variant_id, pv.price, pv.label, p.name, p.id as product_id, "
+            "p.track_stock, p.stock_qty FROM product_variants pv "
             "JOIN products p ON p.id = pv.product_id WHERE pv.id = ?",
             (it["variant_id"],),
         ).fetchone()
@@ -1223,6 +1235,10 @@ def api_create_order():
         qty = int(it.get("quantity", 1))
         items_total += variant["price"] * qty
         resolved_items.append((variant["product_id"], variant["variant_id"], variant["name"], variant["label"], variant["price"], qty))
+        if variant["track_stock"]:
+            pid = variant["product_id"]
+            simple_need[pid] = simple_need.get(pid, 0) + qty
+            simple_info[pid] = {"name": variant["name"], "stock": variant["stock_qty"] or 0}
 
     # --- Правила доставки (только по Батуми, порог + тариф по времени) ---
     fulfillment = body.get("fulfillment_type", "delivery")
@@ -1268,8 +1284,11 @@ def api_create_order():
 
     # Проверка склада (учёт размеров варианта и замен-групп): не даём уйти в минус.
     stock_plan, stock_short = _plan_order_stock(
-        conn, [(pid, vid, qty) for (pid, vid, nm, lb, pr, qty) in resolved_items]
+        conn, [(pid, vid, qty) for (pid, vid, nm, lb, pr, qty) in resolved_items if pid not in simple_need]
     )
+    for pid, need in simple_need.items():
+        if simple_info[pid]["stock"] < need:
+            stock_short.append(simple_info[pid]["name"])
     if stock_short:
         conn.close()
         return jsonify({"error": "out of stock",
@@ -1316,6 +1335,9 @@ def api_create_order():
             "VALUES (?, 'sale', ?, ?)",
             (fid, amt, f"заказ #{order_id}"),
         )
+    # Списание штучных товаров (свой остаток).
+    for pid, need in simple_need.items():
+        cur.execute("UPDATE products SET stock_qty = stock_qty - ? WHERE id = ?", (need, pid))
 
     # Полную строку заказа читаем обратно для богатого уведомления.
     order_row = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
@@ -1389,13 +1411,15 @@ def api_admin_products():
         body = request.get_json(force=True)
         cur = conn.execute(
             "INSERT INTO products (location_id, category_id, name, description, composition, "
-            "photo_url, status, occasion_tags, is_addon, badge) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "photo_url, status, occasion_tags, is_addon, badge, track_stock, stock_qty) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 body["location_id"], body["category_id"], body["name"],
                 body.get("description", ""), body.get("composition", ""),
                 body.get("photo_url", "/static/img/placeholder.svg"),
                 body.get("status", "in_stock"), ",".join(body.get("occasion_tags", [])),
                 1 if body.get("is_addon") else 0, _clean_badge(body.get("badge")),
+                1 if body.get("track_stock") else 0, float(body.get("stock_qty") or 0),
             ),
         )
         product_id = cur.lastrowid
@@ -1443,6 +1467,8 @@ def api_admin_product_edit(product_id):
         "occasion_tags": ",".join(body.get("occasion_tags", [])),
         "is_addon": 1 if body.get("is_addon") else 0,
         "badge": _clean_badge(body.get("badge")),
+        "track_stock": 1 if body.get("track_stock") else 0,
+        "stock_qty": float(body.get("stock_qty") or 0),
     }
     # category_id обновляем только если пришёл (как photo_url): раньше его вообще
     # не было в списке полей — из-за этого смена категории у товара не сохранялась.
@@ -2031,6 +2057,17 @@ def _order_original_consumption(conn, order_id):
     return [(r["flower_stock_id"], r["s"]) for r in rows if r["flower_stock_id"]]
 
 
+def _adjust_simple_goods(conn, order_id, sign):
+    """Корректировка остатка штучных товаров (products.stock_qty) по позициям заказа.
+    sign +1 = вернуть (отмена), -1 = списать снова (переоткрытие)."""
+    rows = conn.execute(
+        "SELECT oi.quantity q, p.id pid FROM order_items oi JOIN products p ON p.id = oi.product_id "
+        "WHERE oi.order_id=? AND p.track_stock=1", (order_id,)
+    ).fetchall()
+    for r in rows:
+        conn.execute("UPDATE products SET stock_qty = stock_qty + ? WHERE id=?", (sign * r["q"], r["pid"]))
+
+
 def _restore_stock(conn, order_id):
     """Возврат склада при отмене — по фактически списанному. Идемпотентно (stock_returned)."""
     row = conn.execute("SELECT stock_returned FROM orders WHERE id=?", (order_id,)).fetchone()
@@ -2041,6 +2078,7 @@ def _restore_stock(conn, order_id):
         conn.execute(
             "INSERT INTO stock_movements (flower_stock_id, movement_type, quantity, note) "
             "VALUES (?, 'return', ?, ?)", (fid, amt, f"отмена #{order_id}"))
+    _adjust_simple_goods(conn, order_id, +1)
     conn.execute("UPDATE orders SET stock_returned=1 WHERE id=?", (order_id,))
     return True
 
@@ -2056,6 +2094,7 @@ def _writeoff_stock(conn, order_id):
         conn.execute(
             "INSERT INTO stock_movements (flower_stock_id, movement_type, quantity, note) "
             "VALUES (?, 'sale', ?, ?)", (fid, amt, f"переоткрытие #{order_id}"))
+    _adjust_simple_goods(conn, order_id, -1)
     conn.execute("UPDATE orders SET stock_returned=0 WHERE id=?", (order_id,))
     return True
 
