@@ -1361,6 +1361,16 @@ def api_create_order():
     )
     order_id = cur.lastrowid
 
+    # Основной курьер: авто-назначение на доставку (один курьер на все заказы —
+    # не назначаем вручную каждый). Настраивается в админке; читаем через тот же cur.
+    if fulfillment == "delivery":
+        _dc = cur.execute("SELECT value FROM app_settings WHERE key='default_courier_id'").fetchone()
+        _dc = ((_dc["value"] if _dc else "") or "").strip()
+        if _dc:
+            _c = cur.execute("SELECT id FROM staff WHERE id=? AND role='courier'", (_dc,)).fetchone()
+            if _c:
+                cur.execute("UPDATE orders SET assigned_staff_id=? WHERE id=?", (_c["id"], order_id))
+
     for product_id, variant_id, name, label, price, qty in resolved_items:
         cur.execute(
             "INSERT INTO order_items (order_id, product_id, variant_id, product_name, variant_label, price, quantity) "
@@ -1872,7 +1882,7 @@ def api_admin_staff_edit(staff_id):
 # который обрабатывается отдельно, и name/address — они в таблице locations).
 EDITABLE_SETTINGS = [
     "min_delivery_amount", "delivery_fee_day", "delivery_fee_night", "delivery_day_end",
-    "slot_capacity",
+    "slot_capacity", "default_courier_id",
     "shop_phone", "shop_instagram", "express_delivery_text", "delivery_payment_info",
     "disclaimer_note",
 ]

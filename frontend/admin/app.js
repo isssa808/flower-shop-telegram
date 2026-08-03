@@ -1034,12 +1034,14 @@ el("add-staff-btn").addEventListener("click", () => openStaffEdit(null));
 
 // --- Магазин и уведомления ---
 async function loadSettings() {
-  const [settings, slots] = await Promise.all([
+  const [settings, slots, couriers] = await Promise.all([
     apiFetch("/api/admin/settings", { tg }),
     apiFetch("/api/admin/delivery-slots", { tg }),
+    apiFetch("/api/admin/couriers", { tg }),
   ]);
   state.settings = settings;
   state.deliverySlots = slots;
+  state.couriers = couriers;
 }
 
 const esc = (v) => String(v == null ? "" : v).replace(/"/g, "&quot;");
@@ -1069,6 +1071,12 @@ function renderSettings() {
           <button type="button" class="btn btn-outline btn-sm" id="add-slot-row">+ окно</button>
         </div>
         <div class="cr-meta" style="margin:-4px 0 10px;">Формат окна: 09:00-11:00. Лимит — сколько заказов принимаем на это окно; когда исчерпан, время пропадает у клиента. Заказ меньше мин. суммы — только самовывоз. Дневной тариф — до «времени смены», ночной — после (приём до 00:00). Доставка только по Батуми.</div>
+        <div class="field"><label>Основной курьер (все доставки авто-назначаются на него)</label>
+          <select name="default_courier_id">
+            <option value="">— не выбран —</option>
+            ${(state.couriers || []).map((c) => `<option value="${c.id}" ${String(s.default_courier_id) === String(c.id) ? "selected" : ""}>${c.name}</option>`).join("")}
+          </select>
+        </div>
 
         <h3 class="settings-group">Контакты</h3>
         <div class="field"><label>Телефон</label><input name="shop_phone" value="${esc(s.shop_phone)}" placeholder="+995 5xx xx xx xx"/></div>
@@ -1122,6 +1130,7 @@ function renderSettings() {
           delivery_fee_day: fd.get("delivery_fee_day"),
           delivery_fee_night: fd.get("delivery_fee_night"),
           delivery_day_end: fd.get("delivery_day_end"),
+          default_courier_id: fd.get("default_courier_id"),
           shop_phone: fd.get("shop_phone"),
           shop_instagram: fd.get("shop_instagram"),
           express_delivery_text: fd.get("express_delivery_text"),
