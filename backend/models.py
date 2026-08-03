@@ -72,6 +72,19 @@ CREATE TABLE IF NOT EXISTS stock_movements (
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Партии прихода цветка (для плашки свежести «получена ДД.ММ»). Ведутся
+-- параллельно с flower_stock.quantity: приход создаёт партию, списание съедает
+-- партии по FIFO (старые → новые). qty_left>0 у нескольких партий = на складе
+-- ещё лежит предыдущая поставка (звёздочка на плашке). Возраст считается по
+-- самой свежей партии с остатком.
+CREATE TABLE IF NOT EXISTS stock_batches (
+    id INTEGER PRIMARY KEY,
+    flower_stock_id INTEGER NOT NULL REFERENCES flower_stock(id) ON DELETE CASCADE,
+    received_at TEXT,                              -- дата прихода "YYYY-MM-DD"
+    qty_received REAL NOT NULL,
+    qty_left REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS product_recipe (
     id INTEGER PRIMARY KEY,
     product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,

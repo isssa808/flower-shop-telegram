@@ -104,6 +104,16 @@
 .stock-qty { font-weight: 700; font-size: 15px; white-space: nowrap; }
 .stock-qty.low { color: var(--danger); }
 
+/* Плашка свежести: цвет по возрасту последней поставки, клик — переворот на предыдущую. */
+.fresh-badge { position: relative; display: block; width: 132px; height: 22px; margin-top: 5px; border: none; padding: 0; background: none; cursor: pointer; font: inherit; transform-style: preserve-3d; transition: transform .4s ease; }
+.fresh-badge.flip { transform: rotateY(180deg); }
+.fresh-badge .fb-front, .fresh-badge .fb-back { position: absolute; inset: 0; display: flex; align-items: center; gap: 4px; padding: 0 9px; border-radius: 999px; font-size: 11px; font-weight: 700; white-space: nowrap; backface-visibility: hidden; -webkit-backface-visibility: hidden; }
+.fresh-badge .fb-back { transform: rotateY(180deg); background: var(--surface-2); border: 1px solid var(--border); color: var(--ink-muted); font-weight: 600; }
+.fresh-badge .fb-star { font-size: 10px; line-height: 1; color: #e0a400; }
+.fresh-badge.fb-fresh .fb-front { background: #dff0e6; color: #2e6b48; }
+.fresh-badge.fb-mid   .fb-front { background: #fcefcf; color: #8a5b12; }
+.fresh-badge.fb-old   .fb-front { background: #f7dcdc; color: #9e2f2b; }
+
 .stock-edit-photo { width: 100%; max-height: 180px; object-fit: cover; border-radius: 12px; margin-bottom: 12px; }
 .stock-adjust { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border); }
 .stock-adjust-title { font-size: 13px; color: var(--ink-muted); margin-bottom: 10px; }

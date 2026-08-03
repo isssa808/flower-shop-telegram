@@ -115,6 +115,21 @@ def bootstrap():
                 (r["product_id"], r["flower_stock_id"], r["quantity_needed"]),
             )
         conn.commit()
+    # Партии прихода для плашки свежести: если таблица пуста — засеять по одной
+    # партии на цветок с текущим остатком. Дата — последнего прихода из движений,
+    # иначе updated_at. Инлайн (bootstrap выполняется раньше поздних хелперов).
+    if not conn.execute("SELECT 1 FROM stock_batches LIMIT 1").fetchone():
+        for _f in conn.execute("SELECT id, quantity, updated_at FROM flower_stock WHERE quantity > 0").fetchall():
+            _inc = conn.execute(
+                "SELECT created_at FROM stock_movements WHERE flower_stock_id=? AND movement_type='income' "
+                "ORDER BY created_at DESC LIMIT 1", (_f["id"],)
+            ).fetchone()
+            _d = ((_inc["created_at"] if _inc else _f["updated_at"]) or "")[:10] or None
+            conn.execute(
+                "INSERT INTO stock_batches (flower_stock_id, received_at, qty_received, qty_left) "
+                "VALUES (?, ?, ?, ?)", (_f["id"], _d, _f["quantity"], _f["quantity"]),
+            )
+        conn.commit()
     # Засев окон доставки дефолтами, если таблица пуста (дальше редактируются в админке).
     if not conn.execute("SELECT 1 FROM delivery_slots LIMIT 1").fetchone():
         _def_slots = ["09:00-11:00", "10:00-12:00", "12:00-14:00", "14:00-16:00",
@@ -1385,6 +1400,7 @@ def api_create_order():
             "VALUES (?, 'sale', ?, ?)",
             (fid, amt, f"заказ #{order_id}"),
         )
+        _batch_consume(conn, fid, amt)  # съесть партии по FIFO (для плашки свежести)
     # Списание штучных товаров (свой остаток).
     for pid, need in simple_need.items():
         cur.execute("UPDATE products SET stock_qty = stock_qty - ? WHERE id = ?", (need, pid))
@@ -1588,8 +1604,9 @@ def api_admin_stock():
                 body.get("pack_size", 0),
             ),
         )
-        conn.commit()
         stock_id = cur.lastrowid
+        _batch_add(conn, stock_id, body.get("quantity", 0))  # стартовый остаток = первая партия
+        conn.commit()
         row = conn.execute("SELECT * FROM flower_stock WHERE id=?", (stock_id,)).fetchone()
         conn.close()
         return jsonify(dict(row)), 201
@@ -1598,8 +1615,19 @@ def api_admin_stock():
     rows = conn.execute(
         "SELECT * FROM flower_stock WHERE location_id = ? ORDER BY name", (location_id,)
     ).fetchall()
+    fresh = _stock_freshness_map(conn)
     conn.close()
-    return jsonify([dict(r) for r in rows])
+    result = []
+    for r in rows:
+        d = dict(r)
+        f = fresh.get(r["id"]) or {}
+        d["fresh_last"] = f.get("last")
+        d["fresh_prev"] = f.get("prev")
+        d["fresh_star"] = bool(f.get("star"))
+        d["fresh_age"] = f.get("age")
+        d["fresh_prev_age"] = f.get("prev_age")
+        result.append(d)
+    return jsonify(result)
 
 
 def _stock_movement(stock_id, movement_type, quantity, note):
@@ -1614,10 +1642,91 @@ def _stock_movement(stock_id, movement_type, quantity, note):
         "INSERT INTO stock_movements (flower_stock_id, movement_type, quantity, note) VALUES (?, ?, ?, ?)",
         (stock_id, movement_type, quantity, note),
     )
+    if movement_type == "income":
+        _batch_add(conn, stock_id, quantity)
+    elif movement_type == "writeoff":
+        _batch_consume(conn, stock_id, quantity)
     conn.commit()
     updated = conn.execute("SELECT * FROM flower_stock WHERE id=?", (stock_id,)).fetchone()
     conn.close()
     return dict(updated)
+
+
+# --------------------------------------------------------------------------
+# Партии прихода (свежесть). Ведутся параллельно с flower_stock.quantity —
+# на неё и на доступность не влияют, только на плашку «получена ДД.ММ».
+# --------------------------------------------------------------------------
+def _batch_add(conn, flower_id, qty, received_at=None):
+    """Новая партия прихода. qty<=0 игнорируется."""
+    q = float(qty or 0)
+    if q <= 0:
+        return
+    conn.execute(
+        "INSERT INTO stock_batches (flower_stock_id, received_at, qty_received, qty_left) "
+        "VALUES (?, ?, ?, ?)", (flower_id, received_at or _batumi_today_str(), q, q),
+    )
+
+
+def _batch_consume(conn, flower_id, amount):
+    """Списать amount из партий по FIFO (старые → новые). Best-effort: если партий
+    не хватает (старые данные), недостачу молча игнорируем — на quantity не влияет."""
+    remaining = float(amount or 0)
+    if remaining <= 0:
+        return
+    for b in conn.execute(
+        "SELECT id, qty_left FROM stock_batches WHERE flower_stock_id=? AND qty_left>0 "
+        "ORDER BY received_at, id", (flower_id,)
+    ).fetchall():
+        if remaining <= 0:
+            break
+        take = min(remaining, b["qty_left"])
+        conn.execute("UPDATE stock_batches SET qty_left = qty_left - ? WHERE id=?", (take, b["id"]))
+        remaining -= take
+
+
+def _batch_return(conn, flower_id, amount):
+    """Вернуть amount в партии (реверс FIFO — пополняем старые → новые до qty_received)."""
+    remaining = float(amount or 0)
+    if remaining <= 0:
+        return
+    for b in conn.execute(
+        "SELECT id, qty_left, qty_received FROM stock_batches WHERE flower_stock_id=? "
+        "AND qty_left < qty_received ORDER BY received_at, id", (flower_id,)
+    ).fetchall():
+        if remaining <= 0:
+            break
+        add = min(remaining, b["qty_received"] - b["qty_left"])
+        conn.execute("UPDATE stock_batches SET qty_left = qty_left + ? WHERE id=?", (add, b["id"]))
+        remaining -= add
+
+
+def _days_since(date_str):
+    """Сколько полных дней прошло с даты 'YYYY-MM-DD' до сегодня (Батуми)."""
+    try:
+        then = time.mktime(time.strptime((date_str or "")[:10], "%Y-%m-%d"))
+        now = time.mktime(time.strptime(_batumi_today_str(), "%Y-%m-%d"))
+    except (ValueError, TypeError):
+        return None
+    return int(round((now - then) / 86400))
+
+
+def _stock_freshness_map(conn):
+    """{flower_id: {last, prev, star, age}} по партиям с остатком. Свежая партия —
+    самая новая (по received_at), звезда — если есть ещё более старая с остатком."""
+    grouped = {}
+    for r in conn.execute(
+        "SELECT flower_stock_id fid, received_at FROM stock_batches WHERE qty_left>0 "
+        "ORDER BY flower_stock_id, received_at DESC, id DESC"
+    ).fetchall():
+        grouped.setdefault(r["fid"], []).append(r["received_at"])
+    out = {}
+    for fid, dates in grouped.items():
+        prev = dates[1] if len(dates) > 1 else None
+        out[fid] = {
+            "last": dates[0], "prev": prev, "star": len(dates) > 1,
+            "age": _days_since(dates[0]), "prev_age": _days_since(prev) if prev else None,
+        }
+    return out
 
 
 @app.route("/api/admin/stock/<int:stock_id>/income", methods=["POST"])
@@ -1654,6 +1763,7 @@ def api_admin_stock_edit(stock_id):
         if used:
             conn.close()
             return jsonify({"error": "in use", "detail": "Цветок используется в рецептах — сначала уберите его из букетов"}), 400
+        conn.execute("DELETE FROM stock_batches WHERE flower_stock_id=?", (stock_id,))
         conn.execute("DELETE FROM stock_movements WHERE flower_stock_id=?", (stock_id,))
         conn.execute("DELETE FROM flower_stock WHERE id=?", (stock_id,))
         conn.commit()
@@ -1721,6 +1831,7 @@ def api_admin_stock_intake():
             "INSERT INTO stock_movements (flower_stock_id, movement_type, quantity, note) VALUES (?, 'income', ?, ?)",
             (stock_id, stems, it.get("note") or "приёмка"),
         )
+        _batch_add(conn, stock_id, stems)  # новая партия для плашки свежести
         applied.append({"flower_id": stock_id, "added": stems})
     conn.commit()
     conn.close()
@@ -2128,6 +2239,7 @@ def _restore_stock(conn, order_id):
         conn.execute(
             "INSERT INTO stock_movements (flower_stock_id, movement_type, quantity, note) "
             "VALUES (?, 'return', ?, ?)", (fid, amt, f"отмена #{order_id}"))
+        _batch_return(conn, fid, amt)  # вернуть в партии (реверс FIFO)
     _adjust_simple_goods(conn, order_id, +1)
     conn.execute("UPDATE orders SET stock_returned=1 WHERE id=?", (order_id,))
     return True
@@ -2144,6 +2256,7 @@ def _writeoff_stock(conn, order_id):
         conn.execute(
             "INSERT INTO stock_movements (flower_stock_id, movement_type, quantity, note) "
             "VALUES (?, 'sale', ?, ?)", (fid, amt, f"переоткрытие #{order_id}"))
+        _batch_consume(conn, fid, amt)  # снова съесть партии по FIFO
     _adjust_simple_goods(conn, order_id, -1)
     conn.execute("UPDATE orders SET stock_returned=0 WHERE id=?", (order_id,))
     return True

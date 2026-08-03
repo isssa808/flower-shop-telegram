@@ -592,10 +592,27 @@ async function loadStock() {
 
 const stockCollapsed = new Set(); // свёрнутые группы (по названию)
 let stockSearch = "";
+let stockSort = "name"; // name | date (по дате последней поставки, свежие сверху)
 
 function _num(n) { const x = Number(n) || 0; return Number.isInteger(x) ? String(x) : String(Math.round(x * 100) / 100); }
 function _stockGroup(s) { return (s.flower_type || "").trim() || "Без группы"; }
 function _q(str) { return String(str == null ? "" : str).replace(/"/g, "&quot;"); }
+function _fmtDM(d) { return d ? d.slice(8, 10) + "." + d.slice(5, 7) : ""; }
+
+// Плашка свежести: цвет по возрасту последней поставки (🟢≤3 / 🟡4–6 / 🔴7+),
+// ★ если ещё лежит предыдущая партия, клик — переворот на дату предыдущей.
+function freshBadgeHtml(s) {
+  if (!s.fresh_last) return "";
+  const age = s.fresh_age;
+  const cls = age == null ? "fb-mid" : age <= 3 ? "fb-fresh" : age >= 7 ? "fb-old" : "fb-mid";
+  const star = s.fresh_star ? '<span class="fb-star">★</span>' : "";
+  const back = s.fresh_prev
+    ? `Пред. ${_fmtDM(s.fresh_prev)}${s.fresh_prev_age != null ? " · " + s.fresh_prev_age + " дн" : ""}`
+    : "одна поставка";
+  return `<button type="button" class="fresh-badge ${cls}">
+      <span class="fb-front">${star}Получена ${_fmtDM(s.fresh_last)}</span>
+      <span class="fb-back">${back}</span></button>`;
+}
 
 function stockRowHtml(s) {
   const low = s.quantity <= s.low_stock_threshold;
@@ -606,6 +623,7 @@ function stockRowHtml(s) {
       <div class="stock-row-main">
         <div class="stock-name">${s.name}${low ? ' <span class="badge badge-rose">мало</span>' : ""}</div>
         <div class="stock-meta">${s.supplier || "поставщик не указан"}</div>
+        ${freshBadgeHtml(s)}
       </div>
       <div class="stock-qty ${low ? "low" : ""}">${_num(s.quantity)} ${s.unit}</div>
     </div>`;
@@ -616,12 +634,18 @@ function renderStock() {
   wrap.innerHTML = `
     <div class="stock-toolbar">
       <input id="stock-search" placeholder="Поиск цветка…"/>
+      <button class="btn btn-outline btn-sm" id="stock-sort">${stockSort === "date" ? "▾ по дате" : "▾ по названию"}</button>
       <button class="btn btn-primary btn-sm" id="open-intake">Приёмка</button>
     </div>
     <div id="stock-groups"></div>`;
   const search = el("stock-search");
   search.value = stockSearch;
   search.addEventListener("input", () => { stockSearch = search.value; renderStockGroups(); });
+  el("stock-sort").addEventListener("click", () => {
+    stockSort = stockSort === "date" ? "name" : "date";
+    el("stock-sort").textContent = stockSort === "date" ? "▾ по дате" : "▾ по названию";
+    renderStockGroups();
+  });
   el("open-intake").addEventListener("click", openIntake);
   renderStockGroups();
 }
@@ -630,12 +654,20 @@ function renderStockGroups() {
   const box = el("stock-groups");
   const q = stockSearch.trim().toLowerCase();
   if (!state.stock.length) { box.innerHTML = `<div class="empty-state">Склад пуст</div>`; return; }
+  // По дате поставки: плоский список, самые залежавшиеся (большой возраст) сверху;
+  // без даты — в конце. По названию — привычные группы-«жалюзи».
+  const byAgeDesc = (a, b) => {
+    const av = a.fresh_age == null ? -1 : a.fresh_age, bv = b.fresh_age == null ? -1 : b.fresh_age;
+    return bv - av || (a.name || "").localeCompare(b.name || "", "ru");
+  };
   let html;
   if (q) {
     const found = state.stock
       .filter((s) => (s.name || "").toLowerCase().includes(q) || (s.flower_type || "").toLowerCase().includes(q))
       .sort((a, b) => (a.name || "").localeCompare(b.name || "", "ru"));
     html = found.length ? found.map(stockRowHtml).join("") : `<div class="empty-state">Ничего не найдено</div>`;
+  } else if (stockSort === "date") {
+    html = [...state.stock].sort(byAgeDesc).map(stockRowHtml).join("");
   } else {
     const groups = {};
     state.stock.forEach((s) => { (groups[_stockGroup(s)] ||= []).push(s); });
@@ -656,6 +688,9 @@ function renderStockGroups() {
     const g = h.dataset.group;
     if (stockCollapsed.has(g)) stockCollapsed.delete(g); else stockCollapsed.add(g);
     renderStockGroups();
+  }));
+  box.querySelectorAll(".fresh-badge").forEach((b) => b.addEventListener("click", (e) => {
+    e.stopPropagation(); b.classList.toggle("flip");
   }));
   box.querySelectorAll("[data-stock]").forEach((r) => r.addEventListener("click", () => openStockItem(Number(r.dataset.stock))));
 }
