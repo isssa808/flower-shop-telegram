@@ -56,6 +56,24 @@
 }
 .st-sum { font-size: 19px; font-weight: 800; color: var(--rose); }
 .st-count { font-weight: 800; color: var(--ink); }
+.pay-split { font-size: 11.5px; color: var(--ink-muted); margin-top: 2px; }
+
+/* касса: заголовок дня, метки события и оплаты, удаление продажи */
+.sales-day-head { font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-muted); margin: 12px 2px 2px; }
+.ev-badge { display: inline-block; font-size: 10.5px; font-weight: 800; padding: 2px 7px; border-radius: 999px; background: #e4f2ea; color: #2e6b48; vertical-align: middle; }
+.ev-badge.ev-order { background: var(--rose-soft, #fbe9ee); color: var(--rose); }
+.pay-tag { display: inline-block; font-size: 10.5px; font-weight: 700; padding: 2px 7px; border-radius: 999px; background: var(--surface); color: var(--ink-muted); border: 1px solid var(--border); vertical-align: middle; }
+.pay-tag.pay-none { color: #a5342f; border-color: #f0c9c6; }
+.order-total { position: relative; font-weight: 800; white-space: nowrap; }
+.sale-del { margin-left: 8px; border: none; background: none; color: var(--ink-muted); font-size: 15px; cursor: pointer; padding: 2px 4px; }
+.sale-del:active { color: var(--danger); }
+
+/* сегмент-переключатель (оплата) и чекбокс */
+.seg { display: flex; gap: 6px; }
+.seg-btn { flex: 1; padding: 9px 4px; border: 1.5px solid var(--border); border-radius: 10px; background: var(--surface-2); color: var(--ink); font: inherit; font-size: 13px; cursor: pointer; }
+.seg-btn.active { border-color: var(--rose); background: var(--rose-soft, #fbe9ee); color: var(--rose); font-weight: 700; }
+.chk { display: flex; align-items: center; gap: 8px; font-size: 13.5px; margin: 12px 0 6px; cursor: pointer; }
+.chk input { width: 17px; height: 17px; }
 
 /* --- назначение курьера / экран курьера --- */
 .assign-box { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }

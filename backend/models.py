@@ -149,6 +149,23 @@ CREATE TABLE IF NOT EXISTS app_settings (
     value TEXT
 );
 
+-- Живые продажи в точке (флорист вбивает вручную): касса за день = доставки + эти.
+-- product_id NULL = вбит вручную (без каталога). Списание со склада — через
+-- stock_movements с note "продажа #<id>" (как у заказов), для отмены-реверса.
+CREATE TABLE IF NOT EXISTS sales (
+    id INTEGER PRIMARY KEY,
+    location_id INTEGER,
+    product_id INTEGER,
+    title TEXT NOT NULL,
+    variant_label TEXT,
+    amount REAL NOT NULL,
+    quantity INTEGER NOT NULL DEFAULT 1,
+    payment_method TEXT,                            -- cash | card | transfer
+    sold_by TEXT,
+    sold_by_id INTEGER,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Окна доставки с индивидуальным лимитом заказов на окно (редактируются в админке).
 CREATE TABLE IF NOT EXISTS delivery_slots (
     id INTEGER PRIMARY KEY,

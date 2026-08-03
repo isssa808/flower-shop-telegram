@@ -44,6 +44,10 @@
       </section>
 
       <section id="view-sales" class="admin-view" style="display:none;">
+        <div class="admin-section-head">
+          <h2>Касса</h2>
+          <button class="btn btn-primary btn-sm" id="add-sale-btn">+ Продажа</button>
+        </div>
         <div class="tabs" id="sales-period-tabs"></div>
         <div id="sales-list"></div>
         <div id="sales-total" class="sales-total-bar"></div>
@@ -126,6 +130,13 @@
     <div class="sheet-handle"></div>
     <button class="sheet-close" data-close="staff-edit" type="button" aria-label="Закрыть">✕</button>
     <div id="staff-edit-content"></div>
+  </div>
+
+  <div class="sheet-backdrop" id="sale-edit-backdrop" data-close="sale-edit"></div>
+  <div class="sheet" id="sale-edit-sheet">
+    <div class="sheet-handle"></div>
+    <button class="sheet-close" data-close="sale-edit" type="button" aria-label="Закрыть">✕</button>
+    <div id="sale-edit-content"></div>
   </div>
 
   <div class="toast" id="toast"></div>

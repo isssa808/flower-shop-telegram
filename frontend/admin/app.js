@@ -78,7 +78,7 @@ document.querySelectorAll(".nav-btn").forEach((btn) => {
     state.view = btn.dataset.view;
     document.querySelectorAll(".admin-view").forEach((v) => (v.style.display = "none"));
     el(`view-${state.view}`).style.display = "block";
-    if (state.view === "sales" && isOwner()) renderSales();
+    if (state.view === "sales" && !isCourier()) renderSales();
   });
 });
 
@@ -244,7 +244,7 @@ function renderOrderDetail(o) {
       ${o.recipient_name ? `Получатель: ${o.recipient_name}<br/>` : ""}
       ${o.card_message ? `Открытка: «${o.card_message}»<br/>` : ""}
       ${o.photo_before_delivery ? "📷 Прислать фото перед доставкой<br/>" : ""}
-      Оплата: ${o.payment_method}
+      Оплата: ${PAY_LABELS[o.payment_method] || "не указана"}
     </div>
     ${o.items.map((i) => `<div class="cart-line">
         ${i.photo_url ? `<img class="order-thumb" src="${i.photo_url}" alt=""/>` : ""}
@@ -264,8 +264,28 @@ function renderOrderDetail(o) {
         <button class="btn btn-outline btn-sm" id="assign-btn">Назначить</button>
       </div>
       ${state.couriers.length ? "" : `<div class="cr-meta" style="margin-top:6px;">Курьеров пока нет${isOwner() ? " — добавьте в разделе Персонал (роль «Курьер»)" : ""}.</div>`}
+    </div>
+    <div class="assign-box">
+      <label>Способ оплаты (для кассы)</label>
+      <div class="seg" id="order-pay">
+        ${[["cash", "Нал"], ["card", "Карта"], ["transfer", "Перевод"]].map(([v, l]) =>
+          `<button type="button" class="seg-btn ${o.payment_method === v ? "active" : ""}" data-pay="${v}">${l}</button>`).join("")}
+      </div>
     </div>` : ""}
   `;
+  const payBox = el("order-pay");
+  if (payBox) {
+    payBox.querySelectorAll(".seg-btn").forEach((b) => b.addEventListener("click", async () => {
+      const pm = b.dataset.pay;
+      payBox.querySelectorAll(".seg-btn").forEach((x) => x.classList.remove("active"));
+      b.classList.add("active");
+      try {
+        await apiFetch(`/api/admin/orders/${o.id}/payment`, { method: "PUT", body: { payment_method: pm }, tg });
+        o.payment_method = pm;
+        showToast("Оплата отмечена");
+      } catch { showToast("Не удалось сохранить оплату"); }
+    }));
+  }
   const assignBtn = el("assign-btn");
   if (assignBtn) {
     assignBtn.addEventListener("click", async () => {
@@ -1221,15 +1241,28 @@ function renderSalesTabs() {
   );
 }
 
+const PAY_LABELS = { cash: "нал", card: "карта", transfer: "перевод" };
+const RU_MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля",
+  "августа", "сентября", "октября", "ноября", "декабря"];
+function fmtDayRu(day) {
+  const [y, m, d] = String(day).split("-").map(Number);
+  return d ? `${d} ${RU_MONTHS[m - 1] || ""}` : String(day);
+}
+
+// Касса = доставленные заказы + живые продажи в точке. Список событий по дням,
+// итог за период и разбивка по способу оплаты.
 async function renderSales() {
   renderSalesTabs();
   const listWrap = el("sales-list");
   const totalWrap = el("sales-total");
-  let orders;
+  let orders = [], sales = [];
   try {
-    orders = await apiFetch(`/api/admin/orders?status=delivered&location_id=${LOCATION_ID}`, { tg });
+    [orders, sales] = await Promise.all([
+      apiFetch(`/api/admin/orders?status=delivered&location_id=${LOCATION_ID}`, { tg }),
+      apiFetch(`/api/admin/sales?period=${state.salesPeriod}`, { tg }),
+    ]);
   } catch {
-    listWrap.innerHTML = `<div class="empty-state">Не удалось загрузить продажи</div>`;
+    listWrap.innerHTML = `<div class="empty-state">Не удалось загрузить кассу</div>`;
     totalWrap.innerHTML = "";
     return;
   }
@@ -1237,44 +1270,205 @@ async function renderSales() {
   const period = state.salesPeriod;
   const keyLen = period === "month" ? 7 : 10;
   const want = period === "month" ? parts.month : parts.day;
-  const list = orders.filter((o) => orderDateKey(o).slice(0, keyLen) === want);
-  state.salesOrders = list;
+  const dOrders = orders.filter((o) => orderDateKey(o).slice(0, keyLen) === want);
+  state.salesOrders = dOrders;
 
-  if (!list.length) {
-    listWrap.innerHTML = `<div class="empty-state">За ${period === "month" ? "месяц" : "день"} выполненных заказов нет</div>`;
+  const events = [];
+  dOrders.forEach((o) => events.push({
+    kind: "order", id: o.id, day: orderDateKey(o), when: (o.delivered_at || o.delivery_date || "").slice(11, 16),
+    title: o.items.map((i) => `${i.product_name}${i.variant_label ? ` (${i.variant_label})` : ""} ×${i.quantity}`).join(", "),
+    thumb: o.items.find((i) => i.photo_url)?.photo_url || "",
+    amount: o.total || 0, pay: o.payment_method, count: o.items.reduce((n, i) => n + i.quantity, 0),
+  }));
+  sales.forEach((s) => events.push({
+    kind: "sale", id: s.id, day: String(s.created_at || "").slice(0, 10), when: String(s.created_at || "").slice(11, 16),
+    title: `${s.title}${s.variant_label ? ` (${s.variant_label})` : ""} ×${s.quantity}`,
+    thumb: "", amount: s.amount || 0, pay: s.payment_method, count: s.quantity,
+  }));
+  events.sort((a, b) => (b.day + (b.when || "")).localeCompare(a.day + (a.when || "")));
+
+  if (!events.length) {
+    listWrap.innerHTML = `<div class="empty-state">За ${period === "month" ? "месяц" : "день"} продаж нет</div>`;
   } else {
-    listWrap.innerHTML = list
-      .map((o) => {
-        const thumb = o.items.find((i) => i.photo_url)?.photo_url;
-        const names = o.items.map((i) => `${i.product_name}${i.variant_label ? ` (${i.variant_label})` : ""} ×${i.quantity}`).join(", ");
-        const when = o.delivered_at || o.delivery_date || "";
-        return `
-    <div class="card sale-card" data-sale="${o.id}">
-      ${thumb ? `<img class="order-thumb" src="${thumb}" alt=""/>` : `<div class="order-thumb"></div>`}
+    let html = "", lastDay = null;
+    events.forEach((e) => {
+      if (period === "month" && e.day !== lastDay) { lastDay = e.day; html += `<div class="sales-day-head">${fmtDayRu(e.day)}</div>`; }
+      const payTag = e.pay ? `<span class="pay-tag">${PAY_LABELS[e.pay] || e.pay}</span>`
+        : (e.kind === "order" ? `<span class="pay-tag pay-none">оплата?</span>` : "");
+      const badge = e.kind === "sale" ? `<span class="ev-badge">точка</span>` : `<span class="ev-badge ev-order">доставка №${e.id}</span>`;
+      const del = e.kind === "sale" ? `<button class="sale-del" data-del-sale="${e.id}" aria-label="Удалить">✕</button>` : "";
+      html += `
+    <div class="card sale-card" ${e.kind === "order" ? `data-open-order="${e.id}"` : ""}>
+      ${e.thumb ? `<img class="order-thumb" src="${e.thumb}" alt=""/>` : `<div class="order-thumb"></div>`}
       <div class="sale-info">
-        <div class="sale-title">Заказ №${o.id}${when ? ` · ${when}` : ""}</div>
-        <div class="sale-items">${names}</div>
+        <div class="sale-title">${badge}${e.when ? ` · ${e.when}` : ""} ${payTag}</div>
+        <div class="sale-items">${e.title || "—"}</div>
       </div>
-      <div class="order-total">${money(o.total)}</div>
+      <div class="order-total">${money(e.amount)}${del}</div>
     </div>`;
-      })
-      .join("");
-    listWrap.querySelectorAll("[data-sale]").forEach((c) =>
+    });
+    listWrap.innerHTML = html;
+    listWrap.querySelectorAll("[data-open-order]").forEach((c) =>
       c.addEventListener("click", () => {
-        const o = state.salesOrders.find((x) => x.id === Number(c.dataset.sale));
+        const o = state.salesOrders.find((x) => x.id === Number(c.dataset.openOrder));
         if (o) renderOrderDetail(o);
-      })
-    );
+      }));
+    listWrap.querySelectorAll("[data-del-sale]").forEach((b) =>
+      b.addEventListener("click", (ev) => { ev.stopPropagation(); deleteSale(Number(b.dataset.delSale)); }));
   }
 
-  const totalSum = list.reduce((s, o) => s + (o.total || 0), 0);
-  const bouquets = list.reduce((s, o) => s + o.items.reduce((n, i) => n + i.quantity, 0), 0);
+  const kassa = events.reduce((s, e) => s + e.amount, 0);
+  const items = events.reduce((s, e) => s + e.count, 0);
+  const paySplit = {};
+  events.forEach((e) => { const k = e.pay || "none"; paySplit[k] = (paySplit[k] || 0) + e.amount; });
+  const splitStr = Object.keys(paySplit).filter((k) => k !== "none")
+    .map((k) => `${PAY_LABELS[k] || k} ${money(paySplit[k])}`).join(" · ");
   totalWrap.innerHTML = `
     <div class="sales-total-inner">
-      <div><span class="st-count">${list.length}</span> заказов · ${bouquets} букетов</div>
-      <div class="st-sum">${money(totalSum)}</div>
+      <div><span class="st-count">${events.length}</span> продаж · ${items} шт${splitStr || paySplit.none ? `<div class="pay-split">${splitStr}${paySplit.none ? `${splitStr ? " · " : ""}без метки ${money(paySplit.none)}` : ""}</div>` : ""}</div>
+      <div class="st-sum">${money(kassa)}</div>
     </div>`;
 }
+
+async function deleteSale(id) {
+  const doDel = async () => {
+    try {
+      await apiFetch(`/api/admin/sales/${id}`, { method: "DELETE", tg });
+      showToast("Продажа удалена, склад возвращён");
+      await loadStock().catch(() => {});
+      renderSales();
+    } catch { showToast("Не удалось удалить"); }
+  };
+  if (tg.showConfirm) tg.showConfirm("Удалить продажу? Списанный склад вернётся.", (ok) => { if (ok) doDel(); });
+  else doDel();
+}
+
+// Список конкретных позиций склада (без групп) — для ручного списания продажи.
+function saleFlowerOptions() {
+  return [...(state.stock || [])].sort((a, b) => (a.name || "").localeCompare(b.name || "", "ru"))
+    .map((f) => `<option value="${f.id}">${f.name}</option>`).join("");
+}
+function addSaleWriteoffRow(box) {
+  const rr = document.createElement("div");
+  rr.className = "recipe-row";
+  rr.innerHTML = `
+    <select class="sw-flower"><option value="">— цветок —</option>${saleFlowerOptions()}</select>
+    <input class="sw-qty" type="number" min="1" step="1" placeholder="шт"/>
+    <button type="button" class="btn-icon sw-remove" aria-label="Убрать">✕</button>`;
+  rr.querySelector(".sw-remove").addEventListener("click", () => rr.remove());
+  box.appendChild(rr);
+}
+
+function openSaleForm() {
+  const prods = (state.products || []).filter((p) => p.status !== "hidden");
+  const prodOpts = `<option value="">— вписать вручную —</option>` +
+    prods.map((p) => `<option value="${p.id}">${_q(p.name)}</option>`).join("");
+  el("sale-edit-content").innerHTML = `
+    <h2>Продажа в точке</h2>
+    <form id="sale-form">
+      <div class="field"><label>Букет</label><select id="sale-product">${prodOpts}</select></div>
+      <div class="field" id="sale-title-wrap"><label>Название (вручную)</label><input id="sale-title" placeholder="Авторский букет"/></div>
+      <div class="field" id="sale-variant-wrap" style="display:none;"><label>Размер</label><select id="sale-variant"></select></div>
+      <div class="field-row">
+        <div class="field"><label>Сумма ₾</label><input id="sale-amount" type="number" min="0" step="1" placeholder="0"/></div>
+        <div class="field"><label>Кол-во</label><input id="sale-qty" type="number" min="1" step="1" value="1"/></div>
+      </div>
+      <div class="field"><label>Оплата</label>
+        <div class="seg" id="sale-pay">
+          <button type="button" class="seg-btn active" data-pay="cash">Нал</button>
+          <button type="button" class="seg-btn" data-pay="card">Карта</button>
+          <button type="button" class="seg-btn" data-pay="transfer">Перевод</button>
+        </div>
+      </div>
+      <label class="chk"><input type="checkbox" id="sale-writeoff" checked/> Списать со склада</label>
+      <div id="sale-writeoff-recipe" class="intake-hint" style="display:none;">Спишется автоматически по рецепту выбранного размера.</div>
+      <div id="sale-writeoff-manual" style="display:none;">
+        <div class="intake-hint">Что списать со склада (напр. продали все розы):</div>
+        <div id="sale-writeoff-rows"></div>
+        <button type="button" class="btn btn-outline btn-sm" id="sale-add-flower">+ цветок</button>
+      </div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-secondary" data-close="sale-edit">Отмена</button>
+        <button type="submit" class="btn btn-primary">Записать</button>
+      </div>
+    </form>`;
+  document.querySelectorAll("#sale-edit-content [data-close]").forEach((b) => b.addEventListener("click", () => closeSheet("sale-edit")));
+
+  let payMethod = "cash";
+  el("sale-pay").querySelectorAll(".seg-btn").forEach((b) => b.addEventListener("click", () => {
+    el("sale-pay").querySelectorAll(".seg-btn").forEach((x) => x.classList.remove("active"));
+    b.classList.add("active"); payMethod = b.dataset.pay;
+  }));
+
+  const rowsBox = el("sale-writeoff-rows");
+  el("sale-add-flower").addEventListener("click", () => addSaleWriteoffRow(rowsBox));
+
+  const applyMode = () => {
+    const pid = el("sale-product").value;
+    const p = pid ? prods.find((x) => x.id === Number(pid)) : null;
+    const woOn = el("sale-writeoff").checked;
+    el("sale-title-wrap").style.display = p ? "none" : "block";
+    // Варианты каталожного товара
+    const vwrap = el("sale-variant-wrap");
+    if (p && (p.variants || []).length) {
+      vwrap.style.display = "block";
+      el("sale-variant").innerHTML = p.variants.map((v) => `<option value="${v.id}">${_q(v.label || "размер")} — ${money(v.price)}</option>`).join("");
+    } else { vwrap.style.display = "none"; el("sale-variant").innerHTML = ""; }
+    // Автосумма из цены первого/выбранного варианта
+    if (p) {
+      const v = (p.variants || []).find((x) => x.id === Number(el("sale-variant").value)) || (p.variants || [])[0];
+      if (v && !el("sale-amount").value) el("sale-amount").value = Math.round(v.price || 0);
+    }
+    // Списание: каталог с рецептом → авто; иначе ручной выбор
+    const hasRecipe = p && (p.variants || []).some((v) => (v.recipe || []).length);
+    const isSimple = p && p.track_stock;
+    el("sale-writeoff-recipe").style.display = woOn && p && (hasRecipe || isSimple) ? "block" : "none";
+    el("sale-writeoff-manual").style.display = woOn && !(p && (hasRecipe || isSimple)) ? "block" : "none";
+    if (woOn && !(p && (hasRecipe || isSimple)) && !rowsBox.children.length) addSaleWriteoffRow(rowsBox);
+  };
+  el("sale-product").addEventListener("change", () => { el("sale-amount").value = ""; applyMode(); });
+  el("sale-variant").addEventListener("change", () => {
+    const p = prods.find((x) => x.id === Number(el("sale-product").value));
+    const v = p && (p.variants || []).find((x) => x.id === Number(el("sale-variant").value));
+    if (v) el("sale-amount").value = Math.round(v.price || 0);
+  });
+  el("sale-writeoff").addEventListener("change", applyMode);
+  applyMode();
+
+  el("sale-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const pid = el("sale-product").value ? Number(el("sale-product").value) : null;
+    const vid = el("sale-variant").value ? Number(el("sale-variant").value) : null;
+    const amount = parseFloat(el("sale-amount").value);
+    if (!(amount >= 0) || Number.isNaN(amount)) { showToast("Укажите сумму"); return; }
+    const title = pid ? "" : (el("sale-title").value || "").trim();
+    if (!pid && !title) { showToast("Укажите название букета"); return; }
+    const writeoffEnabled = el("sale-writeoff").checked;
+    const manual = [];
+    if (writeoffEnabled && el("sale-writeoff-manual").style.display !== "none") {
+      rowsBox.querySelectorAll(".recipe-row").forEach((r) => {
+        const fid = r.querySelector(".sw-flower").value;
+        const qty = parseFloat(r.querySelector(".sw-qty").value);
+        if (fid && qty > 0) manual.push({ flower_id: Number(fid), qty });
+      });
+    }
+    const body = {
+      product_id: pid, variant_id: vid, title, amount,
+      quantity: parseInt(el("sale-qty").value) || 1, payment_method: payMethod,
+      writeoff_enabled: writeoffEnabled, writeoff: manual, location_id: LOCATION_ID,
+    };
+    try {
+      const res = await apiFetch("/api/admin/sales", { method: "POST", body, tg });
+      showToast(res.shortage ? "Записано, но склада не хватило (списан в ноль)" : "Продажа записана");
+      closeSheet("sale-edit");
+      await loadStock().catch(() => {});
+      renderSales();
+    } catch { showToast("Не удалось записать продажу"); }
+  });
+
+  openSheet("sale-edit");
+}
+el("add-sale-btn").addEventListener("click", openSaleForm);
 
 // ---------------------------------------------------------------------
 async function init() {
@@ -1322,10 +1516,18 @@ async function init() {
       // часть разделов может остаться пустой, заказы всё равно работают
     }
   } else {
-    // Флорист: только заказы — прячем вкладки Каталог и Склад.
+    // Флорист: заказы + касса (живые продажи). Каталог и Склад скрыты, но
+    // товары/склад грузим — нужны для формы продажи и списания.
     document
       .querySelectorAll('.nav-btn[data-view="catalog"], .nav-btn[data-view="stock"]')
       .forEach((b) => (b.style.display = "none"));
+    el("nav-sales").style.display = "flex";
+    try {
+      const pos = await apiFetch("/api/admin/pos-data", { tg });
+      state.products = pos.products || [];
+      state.stock = pos.flowers || [];
+      renderSales();
+    } catch (err) { /* касса покажет ошибку загрузки при открытии */ }
   }
 }
 init();

@@ -835,6 +835,13 @@ def _batumi_today_str():
     return f"{n.tm_year:04d}-{n.tm_mon:02d}-{n.tm_mday:02d}"
 
 
+def _batumi_stamp():
+    """Полная метка времени Батуми 'YYYY-MM-DD HH:MM:SS' — для кассы по дням."""
+    n = _batumi_now()
+    return (f"{n.tm_year:04d}-{n.tm_mon:02d}-{n.tm_mday:02d} "
+            f"{n.tm_hour:02d}:{n.tm_min:02d}:{n.tm_sec:02d}")
+
+
 def _slot_capacity():
     try:
         return max(1, int(float(get_setting_or_default("slot_capacity"))))
@@ -2336,6 +2343,194 @@ def api_admin_order_status(order_id):
     if err:
         return jsonify({"error": "invalid transition", "detail": err}), 400
     return jsonify(updated)
+
+
+VALID_PAYMENT_METHODS = ("cash", "card", "transfer")
+
+
+@app.route("/api/admin/orders/<int:order_id>/payment", methods=["PUT"])
+@require_staff
+def api_admin_order_payment(order_id):
+    """Способ оплаты заказа (доставки предоплачены; ставит владелец/флорист при
+    приёме). Нужен для сходимости кассы в отчёте. cash|card|transfer или пусто."""
+    if g.staff.get("role") == "courier":
+        return jsonify({"error": "forbidden"}), 403
+    body = request.get_json(force=True)
+    pm = body.get("payment_method") or None
+    if pm is not None and pm not in VALID_PAYMENT_METHODS:
+        return jsonify({"error": "invalid payment_method", "valid": VALID_PAYMENT_METHODS}), 400
+    conn = get_db()
+    if not conn.execute("SELECT 1 FROM orders WHERE id=?", (order_id,)).fetchone():
+        conn.close()
+        return jsonify({"error": "not found"}), 404
+    conn.execute("UPDATE orders SET payment_method=? WHERE id=?", (pm, order_id))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True, "payment_method": pm})
+
+
+# --------------------------------------------------------------------------
+# Админ API — живые продажи в точке (касса). Флорист/владелец вбивают продажу,
+# списывают склад (каталог — по рецепту, ручной ввод — по выбранным цветам).
+# --------------------------------------------------------------------------
+def _apply_sale_writeoff(conn, sale_id, product_id, variant_id, quantity, manual_lines):
+    """Списать склад под продажу. Возвращает True, если чего-то не хватило (для
+    предупреждения). Ручные строки manual_lines=[(flower_id, qty)] — абсолютные
+    штуки; иначе — по рецепту каталожного товара. Кламп в ноль (не в минус)."""
+    plan, short = [], False
+    if manual_lines:
+        plan = [(int(fid), float(q)) for fid, q in manual_lines if fid and float(q or 0) > 0]
+    elif product_id:
+        prow = conn.execute("SELECT track_stock FROM products WHERE id=?", (product_id,)).fetchone()
+        if prow and prow["track_stock"]:
+            cur = conn.execute("SELECT stock_qty FROM products WHERE id=?", (product_id,)).fetchone()["stock_qty"] or 0
+            new = max(0, cur - quantity)
+            if cur - quantity < 0:
+                short = True
+            conn.execute("UPDATE products SET stock_qty=? WHERE id=?", (new, product_id))
+            return short
+        plan, sh = _plan_order_stock(conn, [(product_id, variant_id, quantity)])
+        if sh:
+            short = True
+    for fid, amt in plan:
+        cur = conn.execute("SELECT quantity FROM flower_stock WHERE id=?", (fid,)).fetchone()
+        if not cur:
+            continue
+        have = cur["quantity"] or 0
+        take = min(have, amt)
+        if amt > have:
+            short = True
+        if take <= 0:
+            continue
+        conn.execute("UPDATE flower_stock SET quantity = quantity - ? WHERE id=?", (take, fid))
+        conn.execute(
+            "INSERT INTO stock_movements (flower_stock_id, movement_type, quantity, note) "
+            "VALUES (?, 'sale', ?, ?)", (fid, take, f"продажа #{sale_id}"))
+        _batch_consume(conn, fid, take)
+    return short
+
+
+def _reverse_sale_writeoff(conn, sale):
+    """Вернуть склад при удалении продажи — по движениям note 'продажа #id'."""
+    rows = conn.execute(
+        "SELECT flower_stock_id, SUM(quantity) s FROM stock_movements "
+        "WHERE note=? AND movement_type='sale' GROUP BY flower_stock_id",
+        (f"продажа #{sale['id']}",),
+    ).fetchall()
+    for r in rows:
+        if not r["flower_stock_id"]:
+            continue
+        conn.execute("UPDATE flower_stock SET quantity = quantity + ? WHERE id=?", (r["s"], r["flower_stock_id"]))
+        conn.execute(
+            "INSERT INTO stock_movements (flower_stock_id, movement_type, quantity, note) "
+            "VALUES (?, 'return', ?, ?)", (r["flower_stock_id"], r["s"], f"отмена продажи #{sale['id']}"))
+        _batch_return(conn, r["flower_stock_id"], r["s"])
+    if sale["product_id"]:
+        prow = conn.execute("SELECT track_stock FROM products WHERE id=?", (sale["product_id"],)).fetchone()
+        if prow and prow["track_stock"]:
+            conn.execute("UPDATE products SET stock_qty = stock_qty + ? WHERE id=?",
+                         (sale["quantity"], sale["product_id"]))
+
+
+@app.route("/api/admin/sales", methods=["GET", "POST"])
+@require_staff
+def api_admin_sales():
+    if g.staff.get("role") == "courier":
+        return jsonify({"error": "forbidden"}), 403
+    conn = get_db()
+    if request.method == "POST":
+        body = request.get_json(force=True)
+        product_id = body.get("product_id") or None
+        variant_id = body.get("variant_id") or None
+        title = (body.get("title") or "").strip()
+        # Название: из каталога подставим сами, если не прислали.
+        if product_id and not title:
+            prow = conn.execute("SELECT name FROM products WHERE id=?", (product_id,)).fetchone()
+            title = prow["name"] if prow else ""
+        if not title:
+            conn.close()
+            return jsonify({"error": "no title", "detail": "Укажите название букета"}), 400
+        try:
+            amount = float(body.get("amount"))
+        except (TypeError, ValueError):
+            conn.close()
+            return jsonify({"error": "bad amount", "detail": "Укажите сумму"}), 400
+        if amount < 0:
+            conn.close()
+            return jsonify({"error": "bad amount"}), 400
+        quantity = int(body.get("quantity") or 1)
+        pm = body.get("payment_method") or None
+        if pm is not None and pm not in VALID_PAYMENT_METHODS:
+            conn.close()
+            return jsonify({"error": "invalid payment_method"}), 400
+        variant_label = None
+        if variant_id:
+            vr = conn.execute("SELECT label FROM product_variants WHERE id=?", (variant_id,)).fetchone()
+            variant_label = vr["label"] if vr else None
+        cur = conn.execute(
+            "INSERT INTO sales (location_id, product_id, title, variant_label, amount, quantity, "
+            "payment_method, sold_by, sold_by_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (body.get("location_id") or 1, product_id, title, variant_label,
+             amount, quantity, pm, g.staff.get("name"), g.staff.get("id"), _batumi_stamp()),
+        )
+        sale_id = cur.lastrowid
+        manual = [(l.get("flower_id"), l.get("qty")) for l in (body.get("writeoff") or [])]
+        short = False
+        if body.get("writeoff_enabled", True):
+            short = _apply_sale_writeoff(conn, sale_id, product_id, variant_id, quantity, manual)
+        conn.commit()
+        row = conn.execute("SELECT * FROM sales WHERE id=?", (sale_id,)).fetchone()
+        conn.close()
+        return jsonify({"sale": dict(row), "shortage": short}), 201
+
+    # GET: продажи за период (day|month, по Батуми).
+    period = request.args.get("period", "day")
+    n = _batumi_now()
+    prefix = (f"{n.tm_year:04d}-{n.tm_mon:02d}" if period == "month"
+              else f"{n.tm_year:04d}-{n.tm_mon:02d}-{n.tm_mday:02d}")
+    rows = conn.execute(
+        "SELECT * FROM sales WHERE COALESCE(created_at,'') LIKE ? ORDER BY created_at DESC",
+        (prefix + "%",),
+    ).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/admin/sales/<int:sale_id>", methods=["DELETE"])
+@require_staff
+def api_admin_sale_delete(sale_id):
+    if g.staff.get("role") == "courier":
+        return jsonify({"error": "forbidden"}), 403
+    conn = get_db()
+    sale = conn.execute("SELECT * FROM sales WHERE id=?", (sale_id,)).fetchone()
+    if not sale:
+        conn.close()
+        return jsonify({"error": "not found"}), 404
+    _reverse_sale_writeoff(conn, sale)
+    conn.execute("DELETE FROM sales WHERE id=?", (sale_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/admin/pos-data")
+@require_staff
+def api_admin_pos_data():
+    """Данные для формы живой продажи (доступно и флористу): каталог с вариантами/
+    рецептами + список позиций склада для ручного списания. Товары/склад-эндпоинты
+    сами по себе только для владельца, поэтому даём флористу этот срез."""
+    if g.staff.get("role") == "courier":
+        return jsonify({"error": "forbidden"}), 403
+    location_id = request.args.get("location_id", 1)
+    conn = get_db()
+    prows = conn.execute(
+        "SELECT * FROM products WHERE location_id = ? ORDER BY name", (location_id,)
+    ).fetchall()
+    products = [_product_with_variants(conn, r) for r in prows]
+    flowers = [{"id": r["id"], "name": r["name"], "flower_type": r["flower_type"]}
+               for r in conn.execute("SELECT id, name, flower_type FROM flower_stock ORDER BY name").fetchall()]
+    conn.close()
+    return jsonify({"products": products, "flowers": flowers})
 
 
 # --------------------------------------------------------------------------
