@@ -1023,13 +1023,20 @@ function setTheme(theme) {
   applyTheme(theme);
   try { tg.CloudStorage?.setItem?.("theme", theme); } catch (_) {}
 }
+function osTheme() {
+  try { return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"; }
+  catch (_) { return "light"; }
+}
 function loadTheme() {
   return new Promise((resolve) => {
     const cs = tg.CloudStorage;
-    if (!cs || !cs.getItem) { applyTheme("system"); return resolve(); }
+    const done = (v) => { state.theme = v; applyTheme(v); resolve(); };
+    if (!cs || !cs.getItem) return done(osTheme());
     try {
-      cs.getItem("theme", (err, val) => { state.theme = !err && val ? val : "system"; applyTheme(state.theme); resolve(); });
-    } catch (_) { applyTheme("system"); resolve(); }
+      cs.getItem("theme", (err, val) => {
+        done(!err && (val === "light" || val === "dark") ? val : osTheme());
+      });
+    } catch (_) { done(osTheme()); }
   });
 }
 
@@ -1054,7 +1061,7 @@ function loadHaptics() {
 function renderProfile() {
   const u = tg.initDataUnsafe?.user;
   const name = u?.first_name ? `${u.first_name}${u.last_name ? " " + u.last_name : ""}` : t("guest");
-  const th = state.theme || "system";
+  const th = state.theme === "dark" ? "dark" : "light";
   const lng = state.lang || "ru";
   const hap = state.haptics !== false;
   const s = state.shop || {};
@@ -1081,7 +1088,6 @@ function renderProfile() {
           <div class="pm-seg" id="pm-theme">
             <button class="pm-seg-btn ${th === "light" ? "active" : ""}" data-theme="light" type="button">${t("theme_light")}</button>
             <button class="pm-seg-btn ${th === "dark" ? "active" : ""}" data-theme="dark" type="button">${t("theme_dark")}</button>
-            <button class="pm-seg-btn ${th === "system" ? "active" : ""}" data-theme="system" type="button">${t("theme_system")}</button>
           </div>
         </div>
         <div class="pm-block-row">
