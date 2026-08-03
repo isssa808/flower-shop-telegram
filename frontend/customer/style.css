@@ -104,6 +104,11 @@
   font-weight: 700; font-size: 18px; flex: none;
 }
 .pc-plus:active { transform: scale(0.92); }
+.pc-plus[disabled] { opacity: 0.4; cursor: default; }
+.pc-tag.oos { background: rgba(0,0,0,0.55); color: #fff; }
+.pc-oos-note { font-size: 11px; color: var(--danger); font-weight: 600; margin: 2px 0 4px; }
+.product-card.pc-unavailable .photo img { filter: grayscale(0.9); opacity: 0.55; }
+.product-card.pc-unavailable .pc-price { opacity: 0.6; }
 
 /* ==== нижнее меню ==== */
 .bottom-nav {

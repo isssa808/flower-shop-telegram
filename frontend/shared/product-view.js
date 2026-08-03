@@ -49,7 +49,7 @@ export function buildProductSheetHtml(p, opts = {}) {
   const variantsHtml = (p.variants || [])
     .map(
       (v) => `
-      <button class="variant-pill ${v.id === selectedVariantId ? "active" : ""}" data-variant="${v.id}"${preview ? " disabled" : ""}>
+      <button class="variant-pill ${v.id === selectedVariantId ? "active" : ""}${v.available === false ? " unavail" : ""}" data-variant="${v.id}"${(preview || v.available === false) ? " disabled" : ""}>
         ${v.label}
         <span class="v-price">${v.price > 0 ? money(v.price) : t("on_request")}</span>
       </button>`
@@ -82,16 +82,22 @@ export function buildProductSheetHtml(p, opts = {}) {
     ? `<div class="pd-meta">${badgeHtml}${likeHtml}${ordersHtml}</div>`
     : "";
 
+  const selVar = (p.variants || []).find((v) => v.id === selectedVariantId);
+  const selUnavail = selVar ? (selVar.available === false) : false;
   const buyBlock = preview
     ? ""
-    : `
+    : (p.available === false
+      ? `<div class="pd-oos">${t("out_of_stock")}</div>`
+      : `
     <div class="pd-label">${t("quantity")}</div>
     <div class="qty-row">
       <button class="qty-btn" id="qty-minus">−</button>
       <span class="qty-value" id="qty-value">${selectedQty}</span>
       <button class="qty-btn" id="qty-plus">+</button>
     </div>
-    <button class="btn btn-primary btn-block" id="add-to-cart-btn">${t("add_to_cart")}</button>`;
+    ${selUnavail
+      ? `<div class="pd-oos">${t("size_unavailable")}</div>`
+      : `<button class="btn btn-primary btn-block" id="add-to-cart-btn">${t("add_to_cart")}</button>`}`);
 
   const addonsBlock = preview ? "" : `<div id="product-addons"></div>`;
 

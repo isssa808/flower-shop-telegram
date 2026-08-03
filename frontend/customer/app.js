@@ -198,14 +198,20 @@ function productCardHtml(p) {
     : `<span class="pc-price">${t("on_request")}</span>`;
   const fav = state.favorites.has(p.id) ? " on" : "";
   const blabel = badgeLabel(t, p.badge);
-  const tag = blabel
-    ? `<span class="pc-tag ${p.badge}">${blabel}</span>`
-    : (p.status === "made_to_order" ? `<span class="pc-tag made">${t("made_to_order")}</span>` : "");
+  const unavailable = p.available === false;
+  const tag = unavailable
+    ? `<span class="pc-tag oos">${t("out_of_stock_short")}</span>`
+    : (blabel
+        ? `<span class="pc-tag ${p.badge}">${blabel}</span>`
+        : (p.status === "made_to_order" ? `<span class="pc-tag made">${t("made_to_order")}</span>` : ""));
   const likes = p.likes > 0
     ? `<div class="pc-likes"><svg viewBox="0 0 24 24" stroke="none"><path d="M12 21C12 21 4 14.5 4 8.8C4 5.9 6.2 4 8.6 4C10.2 4 11.4 4.9 12 6C12.6 4.9 13.8 4 15.4 4C17.8 4 20 5.9 20 8.8C20 14.5 12 21 12 21Z"/></svg>${p.likes}${p.order_count > 0 ? `<span class="pc-orders">· ${t("ordered_times", { n: p.order_count })}</span>` : ""}</div>`
     : (p.order_count > 0 ? `<div class="pc-likes"><span class="pc-orders">${t("ordered_times", { n: p.order_count })}</span></div>` : "");
+  const plus = unavailable
+    ? `<button class="pc-plus" disabled aria-label="add">+</button>`
+    : `<button class="pc-plus" data-add="${p.id}" type="button" aria-label="add">+</button>`;
   return `
-    <div class="product-card" data-product="${p.id}">
+    <div class="product-card${unavailable ? " pc-unavailable" : ""}" data-product="${p.id}">
       <div class="photo">
         ${tag}
         <button class="pc-heart${fav}" data-fav="${p.id}" type="button" aria-label="favorite">
@@ -216,7 +222,8 @@ function productCardHtml(p) {
       <div class="info">
         <div class="pc-name">${p.name}</div>
         ${likes}
-        <div class="pc-row">${priceLabel}<button class="pc-plus" data-add="${p.id}" type="button" aria-label="add">+</button></div>
+        ${unavailable ? `<div class="pc-oos-note">${t("out_of_stock")}</div>` : ""}
+        <div class="pc-row">${priceLabel}${plus}</div>
       </div>
     </div>`;
 }

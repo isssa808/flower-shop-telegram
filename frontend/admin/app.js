@@ -377,9 +377,33 @@ function previewProduct(p) {
   openSheet("product-preview");
 }
 
-function openProductEdit(productId) {
+function flowerOptionsHtml(selValue) {
+  const stock = state.stock || [];
+  const groups = [...new Set(stock.map((s) => (s.flower_type || "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b, "ru"));
+  const flowers = [...stock].sort((a, b) => (a.name || "").localeCompare(b.name || "", "ru"));
+  let opts = `<option value="">— выберите цветок/группу —</option>`;
+  if (groups.length) {
+    opts += `<optgroup label="Группы (замена)">` + groups.map((g) => `<option value="g:${_q(g)}" ${selValue === `g:${g}` ? "selected" : ""}>Группа: ${g}</option>`).join("") + `</optgroup>`;
+  }
+  opts += `<optgroup label="Цветы">` + flowers.map((f) => `<option value="f:${f.id}" ${selValue === `f:${f.id}` ? "selected" : ""}>${f.name}</option>`).join("") + `</optgroup>`;
+  return opts;
+}
+
+function addRecipeRow(box, data = { value: "", qty: "" }) {
+  const rr = document.createElement("div");
+  rr.className = "recipe-row";
+  rr.innerHTML = `
+    <select class="rr-target">${flowerOptionsHtml(data.value)}</select>
+    <input class="rr-qty" type="number" min="1" step="1" placeholder="шт" value="${data.qty ?? ""}"/>
+    <button type="button" class="btn-icon rr-remove" aria-label="Убрать">✕</button>`;
+  rr.querySelector(".rr-remove").addEventListener("click", () => rr.remove());
+  box.appendChild(rr);
+}
+
+async function openProductEdit(productId) {
+  if (!(state.stock && state.stock.length)) { try { await loadStock(); } catch {} }
   const p = productId ? state.products.find((x) => x.id === productId) : null;
-  const variants = p && p.variants.length ? p.variants : [{ label: "", price: "" }];
+  const variants = p && p.variants.length ? p.variants : [{ label: "", price: "", recipe: [] }];
 
   el("product-edit-content").innerHTML = `
     <h2>${p ? "Редактировать товар" : "Новый товар"}</h2>
@@ -389,7 +413,7 @@ function openProductEdit(productId) {
         <select name="category_id">${state.categories.map((c) => `<option value="${c.id}" ${p?.category_id === c.id ? "selected" : ""}>${c.name}</option>`).join("")}</select>
       </div>
       <div class="field"><label>Описание</label><textarea name="description" rows="2">${p?.description || ""}</textarea></div>
-      <div class="field"><label>Состав</label><input name="composition" value="${p?.composition || ""}"/></div>
+      <div class="field"><label>Состав (текст для клиента)</label><input name="composition" value="${p?.composition || ""}"/></div>
       <div class="field"><label>Статус</label>
         <select name="status">
           <option value="in_stock" ${p?.status === "in_stock" ? "selected" : ""}>В наличии</option>
@@ -412,9 +436,9 @@ function openProductEdit(productId) {
       </label>
       <div class="field"><label>Фото</label><input type="file" name="photo" accept="image/*"/></div>
       <div class="field">
-        <label>Варианты (размер и цена)</label>
+        <label>Размеры, цены и рецепт (для склада)</label>
         <div id="variant-editor"></div>
-        <button type="button" class="btn btn-outline btn-sm" id="add-variant-row">+ вариант</button>
+        <button type="button" class="btn btn-outline btn-sm" id="add-variant-row">+ размер</button>
       </div>
       <div class="form-actions">
         <button type="button" class="btn btn-outline" id="preview-product">Превью</button>
@@ -425,16 +449,43 @@ function openProductEdit(productId) {
   `;
 
   const variantEditor = el("variant-editor");
-  function addVariantRow(label = "", price = "") {
+  function addVariantRow(v = { label: "", price: "", recipe: [] }) {
     const row = document.createElement("div");
     row.className = "variant-editor-row";
-    row.innerHTML = `<input placeholder="Например: S — 11 роз" class="v-label" value="${label}"/>
-      <input placeholder="Цена" type="number" step="0.01" class="v-price" style="max-width:90px;" value="${price}"/>
-      <button type="button" class="btn-icon" data-remove-row aria-label="Убрать">✕</button>`;
+    row.innerHTML = `
+      <div class="ver-top">
+        <input placeholder="Например: S — 11 роз" class="v-label" value="${_q(v.label)}"/>
+        <input placeholder="Цена" type="number" step="0.01" class="v-price" value="${v.price ?? ""}"/>
+        <button type="button" class="btn-icon" data-remove-row aria-label="Убрать размер">✕</button>
+      </div>
+      <div class="ver-recipe">
+        <div class="ver-recipe-head"><span>Из чего собран</span><button type="button" class="v-copy-recipe">скопировать с размера</button></div>
+        <div class="recipe-rows"></div>
+        <button type="button" class="btn btn-outline btn-sm v-add-ingredient">+ ингредиент</button>
+      </div>`;
+    const rrBox = row.querySelector(".recipe-rows");
     row.querySelector("[data-remove-row]").addEventListener("click", () => row.remove());
+    row.querySelector(".v-add-ingredient").addEventListener("click", () => addRecipeRow(rrBox));
+    row.querySelector(".v-copy-recipe").addEventListener("click", () => {
+      let best = null, bestN = 0;
+      variantEditor.querySelectorAll(".variant-editor-row").forEach((other) => {
+        if (other === row) return;
+        const n = other.querySelectorAll(".recipe-row").length;
+        if (n > bestN) { bestN = n; best = other; }
+      });
+      if (!best) { showToast("Нет рецепта для копирования"); return; }
+      rrBox.innerHTML = "";
+      best.querySelectorAll(".recipe-row").forEach((rr) => addRecipeRow(rrBox, {
+        value: rr.querySelector(".rr-target").value, qty: rr.querySelector(".rr-qty").value,
+      }));
+    });
+    (v.recipe || []).forEach((ln) => {
+      const value = ln.flower_stock_id ? `f:${ln.flower_stock_id}` : (ln.flower_type ? `g:${ln.flower_type}` : "");
+      addRecipeRow(rrBox, { value, qty: ln.quantity_needed });
+    });
     variantEditor.appendChild(row);
   }
-  variants.forEach((v) => addVariantRow(v.label, v.price));
+  variants.forEach((v) => addVariantRow(v));
   el("add-variant-row").addEventListener("click", () => addVariantRow());
   document.querySelectorAll("#product-edit-content [data-close]").forEach((b) => b.addEventListener("click", () => closeSheet("product-edit")));
   el("preview-product").addEventListener("click", () => previewProduct(formToProduct(variantEditor, p)));
@@ -446,6 +497,14 @@ function openProductEdit(productId) {
       .map((row) => ({
         label: row.querySelector(".v-label").value,
         price: parseFloat(row.querySelector(".v-price").value) || 0,
+        recipe: [...row.querySelectorAll(".recipe-row")].map((rr) => {
+          const val = rr.querySelector(".rr-target").value;
+          const qty = parseFloat(rr.querySelector(".rr-qty").value) || 0;
+          if (!val || qty <= 0) return null;
+          if (val.startsWith("f:")) return { flower_stock_id: Number(val.slice(2)), quantity_needed: qty };
+          if (val.startsWith("g:")) return { flower_type: val.slice(2), quantity_needed: qty };
+          return null;
+        }).filter(Boolean),
       }))
       .filter((v) => v.label);
 

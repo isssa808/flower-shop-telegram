@@ -103,6 +103,15 @@ def bootstrap():
     _add_column_if_missing(conn, "flower_stock", "pack_size", "REAL NOT NULL DEFAULT 0")
     _add_column_if_missing(conn, "flower_stock", "photo_url", "TEXT")
     _add_column_if_missing(conn, "order_items", "variant_id", "INTEGER")
+    # Разовый перенос старых product_recipe → recipe_lines (на товар целиком), если пусто.
+    if not conn.execute("SELECT 1 FROM recipe_lines LIMIT 1").fetchone():
+        for r in conn.execute("SELECT product_id, flower_stock_id, quantity_needed FROM product_recipe").fetchall():
+            conn.execute(
+                "INSERT INTO recipe_lines (product_id, variant_id, flower_stock_id, flower_type, quantity_needed) "
+                "VALUES (?, NULL, ?, NULL, ?)",
+                (r["product_id"], r["flower_stock_id"], r["quantity_needed"]),
+            )
+        conn.commit()
 
     # Разовая зачистка файла-метки, оставшегося после диагностики персистентности.
     try:
@@ -969,15 +978,63 @@ def _clean_badge(value):
     return v if v in ALLOWED_BADGES else ""
 
 
-def _product_with_variants(conn, product_row):
+def _save_variant_recipe(conn, product_id, variant_id, recipe):
+    """Пишем строки рецепта варианта в recipe_lines. Строка = конкретный цветок
+    (flower_stock_id) ИЛИ группа (flower_type). Пустые/нулевые пропускаем."""
+    for ln in (recipe or []):
+        qn = float(ln.get("quantity_needed") or 0)
+        if qn <= 0:
+            continue
+        fid = ln.get("flower_stock_id") or None
+        ftype = (ln.get("flower_type") or "").strip() or None
+        if fid:
+            ftype = None  # конкретный цветок имеет приоритет над группой
+        elif not ftype:
+            continue
+        conn.execute(
+            "INSERT INTO recipe_lines (product_id, variant_id, flower_stock_id, flower_type, quantity_needed) "
+            "VALUES (?, ?, ?, ?, ?)", (product_id, variant_id, fid, ftype, qn))
+
+
+def _product_with_variants(conn, product_row, levels=None):
     p = dict(product_row)
+    if levels is None:
+        levels = _stock_levels(conn)
+    per, grp = levels
     variants = conn.execute(
         "SELECT id, label, price FROM product_variants WHERE product_id = ?", (p["id"],)
     ).fetchall()
-    p["variants"] = [dict(v) for v in variants]
+    prod_lines = conn.execute(
+        "SELECT flower_stock_id, flower_type, quantity_needed FROM recipe_lines "
+        "WHERE product_id=? AND variant_id IS NULL", (p["id"],)
+    ).fetchall()
+    any_recipe = bool(prod_lines)
+    any_avail = False
+    vlist = []
+    for v in variants:
+        vd = dict(v)
+        vlines = conn.execute(
+            "SELECT flower_stock_id, flower_type, quantity_needed FROM recipe_lines WHERE variant_id=?",
+            (v["id"],)
+        ).fetchall()
+        vd["recipe"] = [dict(l) for l in vlines]   # для админки — рецепт этого размера
+        eff = vlines if vlines else prod_lines
+        if eff:
+            any_recipe = True
+            avail = _variant_available(eff, per, grp)
+        else:
+            avail = True  # без рецепта — доступен (ручной статус)
+        vd["available"] = avail
+        any_avail = any_avail or avail
+        vlist.append(vd)
+    p["variants"] = vlist
+    p["recipe"] = [dict(l) for l in prod_lines]     # рецепт на товар целиком (если задан)
+    if vlist:
+        p["available"] = (any_avail if any_recipe else True)
+    else:
+        p["available"] = (_variant_available(prod_lines, per, grp) if prod_lines else True)
     p["occasion_tags"] = [t for t in (p.get("occasion_tags") or "").split(",") if t]
-    # Популярность: лайки (кол-во добавивших в избранное) и число заказов
-    # (сколько заказов включали товар, кроме отменённых). Показываем на карточке.
+    # Популярность: лайки и число заказов (кроме отменённых). Показываем на карточке.
     p["likes"] = conn.execute(
         "SELECT COUNT(*) c FROM favorites WHERE product_id = ?", (p["id"],)
     ).fetchone()["c"]
@@ -1014,7 +1071,8 @@ def api_products():
 
     conn = get_db()
     rows = conn.execute(query, params).fetchall()
-    result = [_product_with_variants(conn, r) for r in rows]
+    levels = _stock_levels(conn)
+    result = [_product_with_variants(conn, r, levels) for r in rows]
     conn.close()
     return jsonify(result)
 
@@ -1155,7 +1213,7 @@ def api_create_order():
     resolved_items = []
     for it in items:
         variant = cur.execute(
-            "SELECT pv.price, pv.label, p.name, p.id as product_id FROM product_variants pv "
+            "SELECT pv.id AS variant_id, pv.price, pv.label, p.name, p.id as product_id FROM product_variants pv "
             "JOIN products p ON p.id = pv.product_id WHERE pv.id = ?",
             (it["variant_id"],),
         ).fetchone()
@@ -1164,7 +1222,7 @@ def api_create_order():
             return jsonify({"error": f"variant {it['variant_id']} not found"}), 400
         qty = int(it.get("quantity", 1))
         items_total += variant["price"] * qty
-        resolved_items.append((variant["product_id"], variant["name"], variant["label"], variant["price"], qty))
+        resolved_items.append((variant["product_id"], variant["variant_id"], variant["name"], variant["label"], variant["price"], qty))
 
     # --- Правила доставки (только по Батуми, порог + тариф по времени) ---
     fulfillment = body.get("fulfillment_type", "delivery")
@@ -1208,6 +1266,15 @@ def api_create_order():
 
     total = items_total + delivery_fee
 
+    # Проверка склада (учёт размеров варианта и замен-групп): не даём уйти в минус.
+    stock_plan, stock_short = _plan_order_stock(
+        conn, [(pid, vid, qty) for (pid, vid, nm, lb, pr, qty) in resolved_items]
+    )
+    if stock_short:
+        conn.close()
+        return jsonify({"error": "out of stock",
+                        "detail": "Не хватает на складе: " + ", ".join(sorted(set(stock_short))) + ". Уточните у менеджера."}), 409
+
     cur.execute(
         """INSERT INTO orders (location_id, customer_tg_id, customer_name, customer_phone,
            fulfillment_type, address, delivery_date, delivery_slot, recipient_name,
@@ -1235,34 +1302,20 @@ def api_create_order():
     )
     order_id = cur.lastrowid
 
-    oversold = []
-    for product_id, name, label, price, qty in resolved_items:
+    for product_id, variant_id, name, label, price, qty in resolved_items:
         cur.execute(
-            "INSERT INTO order_items (order_id, product_id, product_name, variant_label, price, quantity) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (order_id, product_id, name, label, price, qty),
+            "INSERT INTO order_items (order_id, product_id, variant_id, product_name, variant_label, price, quantity) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (order_id, product_id, variant_id, name, label, price, qty),
         )
-        # автосписание по рецепту, если он задан для товара
-        recipe = cur.execute(
-            "SELECT flower_stock_id, quantity_needed FROM product_recipe WHERE product_id = ?",
-            (product_id,),
-        ).fetchall()
-        for r in recipe:
-            need = r["quantity_needed"] * qty
-            cur.execute(
-                "UPDATE flower_stock SET quantity = quantity - ? WHERE id = ?",
-                (need, r["flower_stock_id"]),
-            )
-            cur.execute(
-                "INSERT INTO stock_movements (flower_stock_id, movement_type, quantity, note) "
-                "VALUES (?, 'sale', ?, ?)",
-                (r["flower_stock_id"], need, f"заказ #{order_id}"),
-            )
-            left = cur.execute(
-                "SELECT quantity, name FROM flower_stock WHERE id = ?", (r["flower_stock_id"],)
-            ).fetchone()
-            if left and left["quantity"] < 0:
-                oversold.append(left["name"])
+    # Списание склада по заранее рассчитанному плану (размеры варианта + замены-группы).
+    for fid, amt in stock_plan:
+        cur.execute("UPDATE flower_stock SET quantity = quantity - ? WHERE id = ?", (amt, fid))
+        cur.execute(
+            "INSERT INTO stock_movements (flower_stock_id, movement_type, quantity, note) "
+            "VALUES (?, 'sale', ?, ?)",
+            (fid, amt, f"заказ #{order_id}"),
+        )
 
     # Полную строку заказа читаем обратно для богатого уведомления.
     order_row = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
@@ -1281,13 +1334,6 @@ def api_create_order():
         reply_markup=_order_action_markup(order_id),
         fallback_chat_id=STAFF_CHAT_ID,
     )
-    # Мягкое предупреждение персоналу, если списание ушло в минус (не хватает склада).
-    if oversold:
-        enqueue_notification(
-            resolve_staff_chat_id(),
-            f"⚠️ Заказ #{order_id}: не хватает на складе — {', '.join(sorted(set(oversold)))}. Пополните склад.",
-            fallback_chat_id=STAFF_CHAT_ID,
-        )
     return jsonify({"id": order_id, "total": total, "delivery_fee": delivery_fee,
                     "items_total": items_total, "status": "new"}), 201
 
@@ -1354,10 +1400,11 @@ def api_admin_products():
         )
         product_id = cur.lastrowid
         for v in body.get("variants", []):
-            conn.execute(
+            vc = conn.execute(
                 "INSERT INTO product_variants (product_id, label, price) VALUES (?, ?, ?)",
                 (product_id, v["label"], v["price"]),
             )
+            _save_variant_recipe(conn, product_id, vc.lastrowid, v.get("recipe"))
         conn.commit()
         row = conn.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
         result = _product_with_variants(conn, row)
@@ -1368,7 +1415,8 @@ def api_admin_products():
     rows = conn.execute(
         "SELECT * FROM products WHERE location_id = ? ORDER BY id DESC", (location_id,)
     ).fetchall()
-    result = [_product_with_variants(conn, r) for r in rows]
+    levels = _stock_levels(conn)
+    result = [_product_with_variants(conn, r, levels) for r in rows]
     conn.close()
     return jsonify(result)
 
@@ -1408,12 +1456,14 @@ def api_admin_product_edit(product_id):
         (*fields.values(), product_id),
     )
     if "variants" in body:
+        conn.execute("DELETE FROM recipe_lines WHERE product_id = ?", (product_id,))
         conn.execute("DELETE FROM product_variants WHERE product_id = ?", (product_id,))
         for v in body["variants"]:
-            conn.execute(
+            vc = conn.execute(
                 "INSERT INTO product_variants (product_id, label, price) VALUES (?, ?, ?)",
                 (product_id, v["label"], v["price"]),
             )
+            _save_variant_recipe(conn, product_id, vc.lastrowid, v.get("recipe"))
     conn.commit()
     row = conn.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
     result = _product_with_variants(conn, row)
@@ -1884,60 +1934,128 @@ def _transition_allowed(cur_status, new_status):
     return False, "Нельзя вернуть статус назад"
 
 
+def _stock_levels(conn):
+    """Текущие остатки: per={flower_id: qty}, grp={тип: сумма qty по группе}."""
+    per, grp = {}, {}
+    for r in conn.execute("SELECT id, flower_type, quantity FROM flower_stock").fetchall():
+        q = r["quantity"] or 0
+        per[r["id"]] = q
+        t = (r["flower_type"] or "").strip()
+        if t:
+            grp[t] = grp.get(t, 0) + q
+    return per, grp
+
+
+def _recipe_lines_for(conn, product_id, variant_id):
+    """Строки рецепта варианта; если своих нет — рецепт товара (variant_id IS NULL)."""
+    lines = []
+    if variant_id:
+        lines = conn.execute(
+            "SELECT flower_stock_id, flower_type, quantity_needed FROM recipe_lines WHERE variant_id=?",
+            (variant_id,),
+        ).fetchall()
+    if not lines:
+        lines = conn.execute(
+            "SELECT flower_stock_id, flower_type, quantity_needed FROM recipe_lines "
+            "WHERE product_id=? AND variant_id IS NULL",
+            (product_id,),
+        ).fetchall()
+    return lines
+
+
+def _variant_available(lines, per, grp):
+    """Хватает ли склада на 1 шт по рецепту (конкретный цветок / сумма группы)."""
+    for ln in lines:
+        need = ln["quantity_needed"] or 0
+        if ln["flower_stock_id"]:
+            if per.get(ln["flower_stock_id"], 0) < need:
+                return False
+        elif ln["flower_type"]:
+            if grp.get((ln["flower_type"] or "").strip(), 0) < need:
+                return False
+    return True
+
+
+def _plan_order_stock(conn, order_lines):
+    """order_lines: [(product_id, variant_id, qty)]. Что и сколько списать: конкретные
+    строки — с цветка; групповые — из группы, сначала где больше (замены).
+    Возвращает (plan=[(flower_id, amount)], shortage=[тексты нехватки])."""
+    stock, gmembers = {}, {}
+    for r in conn.execute("SELECT id, flower_type, quantity, name FROM flower_stock").fetchall():
+        t = (r["flower_type"] or "").strip()
+        stock[r["id"]] = {"qty": r["quantity"] or 0, "type": t, "name": r["name"]}
+        if t:
+            gmembers.setdefault(t, []).append(r["id"])
+    plan, shortage = [], []
+    for (product_id, variant_id, qty) in order_lines:
+        for ln in _recipe_lines_for(conn, product_id, variant_id):
+            need = (ln["quantity_needed"] or 0) * qty
+            if need <= 0:
+                continue
+            if ln["flower_stock_id"]:
+                fid = ln["flower_stock_id"]
+                info = stock.get(fid)
+                if not info or info["qty"] < need:
+                    shortage.append(info["name"] if info else f"цветок #{fid}")
+                if info:
+                    info["qty"] -= need
+                plan.append((fid, need))
+            elif ln["flower_type"]:
+                t = (ln["flower_type"] or "").strip()
+                members = sorted(gmembers.get(t, []), key=lambda f: -stock[f]["qty"])
+                if sum(stock[f]["qty"] for f in members) < need:
+                    shortage.append(t)
+                remaining = need
+                for f in members:
+                    if remaining <= 0:
+                        break
+                    take = min(remaining, stock[f]["qty"])
+                    if take > 0:
+                        stock[f]["qty"] -= take
+                        plan.append((f, take))
+                        remaining -= take
+                if remaining > 0 and members:  # нехватку отметили; остаток спишем с первого
+                    stock[members[0]]["qty"] -= remaining
+                    plan.append((members[0], remaining))
+    return plan, shortage
+
+
+def _order_original_consumption(conn, order_id):
+    """Сколько реально списано при создании заказа (движения sale «заказ #id»),
+    агрегировано по цветку — для точного возврата/повторного списания."""
+    rows = conn.execute(
+        "SELECT flower_stock_id, SUM(quantity) s FROM stock_movements "
+        "WHERE note=? AND movement_type='sale' GROUP BY flower_stock_id",
+        (f"заказ #{order_id}",),
+    ).fetchall()
+    return [(r["flower_stock_id"], r["s"]) for r in rows if r["flower_stock_id"]]
+
+
 def _restore_stock(conn, order_id):
-    """Возврат списанного при создании склада при отмене заказа. Идемпотентно
-    (флаг orders.stock_returned) — повторный вызов ничего не делает."""
+    """Возврат склада при отмене — по фактически списанному. Идемпотентно (stock_returned)."""
     row = conn.execute("SELECT stock_returned FROM orders WHERE id=?", (order_id,)).fetchone()
     if not row or (row["stock_returned"] or 0):
         return False
-    items = conn.execute(
-        "SELECT product_id, quantity FROM order_items WHERE order_id=?", (order_id,)
-    ).fetchall()
-    for it in items:
-        if not it["product_id"]:
-            continue
-        recipe = conn.execute(
-            "SELECT flower_stock_id, quantity_needed FROM product_recipe WHERE product_id=?",
-            (it["product_id"],),
-        ).fetchall()
-        for r in recipe:
-            back = r["quantity_needed"] * it["quantity"]
-            conn.execute("UPDATE flower_stock SET quantity = quantity + ? WHERE id=?",
-                         (back, r["flower_stock_id"]))
-            conn.execute(
-                "INSERT INTO stock_movements (flower_stock_id, movement_type, quantity, note) "
-                "VALUES (?, 'return', ?, ?)",
-                (r["flower_stock_id"], back, f"отмена #{order_id}"),
-            )
+    for fid, amt in _order_original_consumption(conn, order_id):
+        conn.execute("UPDATE flower_stock SET quantity = quantity + ? WHERE id=?", (amt, fid))
+        conn.execute(
+            "INSERT INTO stock_movements (flower_stock_id, movement_type, quantity, note) "
+            "VALUES (?, 'return', ?, ?)", (fid, amt, f"отмена #{order_id}"))
     conn.execute("UPDATE orders SET stock_returned=1 WHERE id=?", (order_id,))
     return True
 
 
 def _writeoff_stock(conn, order_id):
-    """Повторное списание склада при «отмене отмены» заказа владельцем.
-    Идемпотентно: списывает только если ранее был возврат (stock_returned=1)."""
+    """Повторное списание при «отмене отмены» — по тому же фактически списанному.
+    Идемпотентно (stock_returned)."""
     row = conn.execute("SELECT stock_returned FROM orders WHERE id=?", (order_id,)).fetchone()
     if not row or not (row["stock_returned"] or 0):
         return False
-    items = conn.execute(
-        "SELECT product_id, quantity FROM order_items WHERE order_id=?", (order_id,)
-    ).fetchall()
-    for it in items:
-        if not it["product_id"]:
-            continue
-        recipe = conn.execute(
-            "SELECT flower_stock_id, quantity_needed FROM product_recipe WHERE product_id=?",
-            (it["product_id"],),
-        ).fetchall()
-        for r in recipe:
-            need = r["quantity_needed"] * it["quantity"]
-            conn.execute("UPDATE flower_stock SET quantity = quantity - ? WHERE id=?",
-                         (need, r["flower_stock_id"]))
-            conn.execute(
-                "INSERT INTO stock_movements (flower_stock_id, movement_type, quantity, note) "
-                "VALUES (?, 'sale', ?, ?)",
-                (r["flower_stock_id"], need, f"переоткрытие #{order_id}"),
-            )
+    for fid, amt in _order_original_consumption(conn, order_id):
+        conn.execute("UPDATE flower_stock SET quantity = quantity - ? WHERE id=?", (amt, fid))
+        conn.execute(
+            "INSERT INTO stock_movements (flower_stock_id, movement_type, quantity, note) "
+            "VALUES (?, 'sale', ?, ?)", (fid, amt, f"переоткрытие #{order_id}"))
     conn.execute("UPDATE orders SET stock_returned=0 WHERE id=?", (order_id,))
     return True
 

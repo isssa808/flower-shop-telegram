@@ -38,6 +38,9 @@
 }
 .variant-pill .v-price { display: block; font-weight: 700; color: var(--rose); margin-top: 2px; }
 .variant-pill.active { border-color: var(--rose); background: var(--rose-soft); }
+.variant-pill.unavail { opacity: 0.4; text-decoration: line-through; }
+.variant-pill:disabled { cursor: default; }
+.pd-oos { background: rgba(194,59,59,0.10); color: var(--danger); border-radius: 12px; padding: 12px 14px; font-size: 13px; font-weight: 600; text-align: center; margin-top: 4px; }
 .qty-row { display: flex; align-items: center; gap: 14px; margin-bottom: 16px; }
 .qty-btn {
   width: 36px; height: 36px; border-radius: 50%; border: 1.5px solid var(--border);

@@ -130,8 +130,17 @@
 /* --- формы в шитах --- */
 .form-actions { display: flex; gap: 10px; margin-top: 18px; }
 .form-actions .btn { flex: 1; }
-.variant-editor-row { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
-.variant-editor-row input { flex: 1; }
+.variant-editor-row { border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; margin-bottom: 10px; background: var(--surface-2); }
+.ver-top { display: flex; gap: 8px; align-items: center; }
+.ver-top .v-label { flex: 1; }
+.ver-top .v-price { max-width: 90px; }
+.ver-recipe { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border); }
+.ver-recipe-head { display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: var(--ink-muted); margin-bottom: 8px; }
+.v-copy-recipe { background: none; border: none; color: var(--petrol); font: inherit; font-size: 12px; cursor: pointer; padding: 0; }
+.recipe-rows { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+.recipe-row { display: flex; gap: 8px; align-items: center; }
+.recipe-row .rr-target { flex: 1; min-width: 0; }
+.recipe-row .rr-qty { width: 64px; flex: none; }
 /* Кнопка закрытия шторки: position:fixed попадает в трансформированный .sheet
    как в контейнер, поэтому держится в правом верхнем углу и не уезжает при
    прокрутке длинной формы. */
