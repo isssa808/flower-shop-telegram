@@ -1820,21 +1820,52 @@ def _restore_stock(conn, order_id):
     return True
 
 
-def change_order_status(order_id, new_status, actor_name=None, notify_staff=True):
+def _writeoff_stock(conn, order_id):
+    """Повторное списание склада при «отмене отмены» заказа владельцем.
+    Идемпотентно: списывает только если ранее был возврат (stock_returned=1)."""
+    row = conn.execute("SELECT stock_returned FROM orders WHERE id=?", (order_id,)).fetchone()
+    if not row or not (row["stock_returned"] or 0):
+        return False
+    items = conn.execute(
+        "SELECT product_id, quantity FROM order_items WHERE order_id=?", (order_id,)
+    ).fetchall()
+    for it in items:
+        if not it["product_id"]:
+            continue
+        recipe = conn.execute(
+            "SELECT flower_stock_id, quantity_needed FROM product_recipe WHERE product_id=?",
+            (it["product_id"],),
+        ).fetchall()
+        for r in recipe:
+            need = r["quantity_needed"] * it["quantity"]
+            conn.execute("UPDATE flower_stock SET quantity = quantity - ? WHERE id=?",
+                         (need, r["flower_stock_id"]))
+            conn.execute(
+                "INSERT INTO stock_movements (flower_stock_id, movement_type, quantity, note) "
+                "VALUES (?, 'sale', ?, ?)",
+                (r["flower_stock_id"], need, f"переоткрытие #{order_id}"),
+            )
+    conn.execute("UPDATE orders SET stock_returned=0 WHERE id=?", (order_id,))
+    return True
+
+
+def change_order_status(order_id, new_status, actor_name=None, notify_staff=True, force=False):
     """Единая точка смены статуса: валидация перехода, отметки времени, отметка
     приёма, возврат склада при отмене и уведомления. Используется и HTTP-эндпоинтом,
-    и кнопками в Telegram. Возвращает (order_dict|None, err|None): err!=None — переход
-    отклонён (order_dict — текущее состояние); order_dict=None — заказ не найден."""
+    и кнопками в Telegram. force=True (владелец) снимает проверку направления —
+    можно исправить случайный статус/переоткрыть. Возвращает (order_dict|None,
+    err|None): err!=None — переход отклонён; order_dict=None — заказ не найден."""
     conn = get_db()
     order = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
     if not order:
         conn.close()
         return None, "not found"
     cur_status = order["status"]
-    ok, err = _transition_allowed(cur_status, new_status)
-    if not ok:
-        conn.close()
-        return dict(order), err
+    if not force:
+        ok, err = _transition_allowed(cur_status, new_status)
+        if not ok:
+            conn.close()
+            return dict(order), err
     if new_status == cur_status:
         conn.close()
         return dict(order), None
@@ -1851,8 +1882,12 @@ def change_order_status(order_id, new_status, actor_name=None, notify_staff=True
             "AND (accepted_at IS NULL OR accepted_at='')",
             (_batumi_stamp(), actor_name or "", order_id),
         )
-    if new_status == "cancelled":
+    # Склад: при отмене — вернуть; при «отмене отмены» (владелец переоткрыл заказ)
+    # — списать заново, чтобы остатки не разъехались.
+    if new_status == "cancelled" and cur_status != "cancelled":
         _restore_stock(conn, order_id)
+    elif cur_status == "cancelled" and new_status != "cancelled":
+        _writeoff_stock(conn, order_id)
     conn.commit()
     updated = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
     conn.close()
@@ -1881,7 +1916,8 @@ def api_admin_order_status(order_id):
             return jsonify({"error": "forbidden", "detail": "Это не ваш заказ"}), 403
         if status != "delivered":
             return jsonify({"error": "forbidden", "detail": "Курьер может отметить только «Доставлен»"}), 403
-    updated, err = change_order_status(order_id, status, actor_name=g.staff.get("name"))
+    updated, err = change_order_status(order_id, status, actor_name=g.staff.get("name"),
+                                       force=(g.staff.get("role") == "owner"))
     if updated is None:
         return jsonify({"error": "not found"}), 404
     if err:
