@@ -510,110 +510,260 @@ async function loadStock() {
   state.stock = await apiFetch(`/api/admin/stock?location_id=${LOCATION_ID}`, { tg });
 }
 
-function renderStock() {
-  const wrap = el("stock-list");
-  if (!state.stock.length) {
-    wrap.innerHTML = `<div class="empty-state">Склад пуст</div>`;
-    return;
-  }
-  wrap.innerHTML = state.stock
-    .map((s) => {
-      const low = s.quantity <= s.low_stock_threshold;
-      return `
-    <div class="card stock-row ${low ? "low" : ""}">
-      <div>
+const stockCollapsed = new Set(); // свёрнутые группы (по названию)
+let stockSearch = "";
+
+function _num(n) { const x = Number(n) || 0; return Number.isInteger(x) ? String(x) : String(Math.round(x * 100) / 100); }
+function _stockGroup(s) { return (s.flower_type || "").trim() || "Без группы"; }
+function _q(str) { return String(str == null ? "" : str).replace(/"/g, "&quot;"); }
+
+function stockRowHtml(s) {
+  const low = s.quantity <= s.low_stock_threshold;
+  const img = s.photo_url ? `<img src="${s.photo_url}" alt=""/>` : `<span class="ph">🌸</span>`;
+  return `
+    <div class="stock-row card ${low ? "low" : ""}" data-stock="${s.id}">
+      <div class="stock-thumb">${img}</div>
+      <div class="stock-row-main">
         <div class="stock-name">${s.name}${low ? ' <span class="badge badge-rose">мало</span>' : ""}</div>
         <div class="stock-meta">${s.supplier || "поставщик не указан"}</div>
-        <div class="stock-actions">
-          <button class="btn btn-outline btn-sm" data-income="${s.id}">+ приход</button>
-          <button class="btn btn-outline btn-sm" data-writeoff="${s.id}">− списание</button>
+      </div>
+      <div class="stock-qty ${low ? "low" : ""}">${_num(s.quantity)} ${s.unit}</div>
+    </div>`;
+}
+
+function renderStock() {
+  const wrap = el("stock-list");
+  wrap.innerHTML = `
+    <div class="stock-toolbar">
+      <input id="stock-search" placeholder="Поиск цветка…"/>
+      <button class="btn btn-primary btn-sm" id="open-intake">Приёмка</button>
+    </div>
+    <div id="stock-groups"></div>`;
+  const search = el("stock-search");
+  search.value = stockSearch;
+  search.addEventListener("input", () => { stockSearch = search.value; renderStockGroups(); });
+  el("open-intake").addEventListener("click", openIntake);
+  renderStockGroups();
+}
+
+function renderStockGroups() {
+  const box = el("stock-groups");
+  const q = stockSearch.trim().toLowerCase();
+  if (!state.stock.length) { box.innerHTML = `<div class="empty-state">Склад пуст</div>`; return; }
+  let html;
+  if (q) {
+    const found = state.stock
+      .filter((s) => (s.name || "").toLowerCase().includes(q) || (s.flower_type || "").toLowerCase().includes(q))
+      .sort((a, b) => (a.name || "").localeCompare(b.name || "", "ru"));
+    html = found.length ? found.map(stockRowHtml).join("") : `<div class="empty-state">Ничего не найдено</div>`;
+  } else {
+    const groups = {};
+    state.stock.forEach((s) => { (groups[_stockGroup(s)] ||= []).push(s); });
+    html = Object.keys(groups).sort((a, b) => a.localeCompare(b, "ru")).map((g) => {
+      const rows = groups[g].sort((a, b) => (a.name || "").localeCompare(b.name || "", "ru"));
+      const collapsed = stockCollapsed.has(g);
+      return `
+        <div class="stock-group ${collapsed ? "collapsed" : ""}">
+          <button class="stock-group-head" data-group="${_q(g)}" type="button">
+            <span>${g} <span class="cnt">${rows.length}</span></span><span class="chev">▾</span>
+          </button>
+          <div class="stock-group-body">${rows.map(stockRowHtml).join("")}</div>
+        </div>`;
+    }).join("");
+  }
+  box.innerHTML = html;
+  box.querySelectorAll(".stock-group-head").forEach((h) => h.addEventListener("click", () => {
+    const g = h.dataset.group;
+    if (stockCollapsed.has(g)) stockCollapsed.delete(g); else stockCollapsed.add(g);
+    renderStockGroups();
+  }));
+  box.querySelectorAll("[data-stock]").forEach((r) => r.addEventListener("click", () => openStockItem(Number(r.dataset.stock))));
+}
+
+function openStockItem(id) {
+  const s = id ? state.stock.find((x) => x.id === id) : null;
+  const v = (k, d = "") => (s && s[k] != null ? s[k] : d);
+  el("stock-action-content").innerHTML = `
+    <h2>${s ? "Цветок: " + s.name : "Новая позиция"}</h2>
+    <form id="stock-item-form">
+      ${s && s.photo_url ? `<img class="stock-edit-photo" src="${s.photo_url}" alt=""/>` : ""}
+      <div class="field"><label>Фото</label><input type="file" name="photo" accept="image/*"/></div>
+      <div class="field"><label>Название</label><input name="name" required value="${_q(v("name"))}" placeholder="Бомбастик, красная"/></div>
+      <div class="field-row">
+        <div class="field"><label>Группа / тип</label><input name="flower_type" value="${_q(v("flower_type"))}" placeholder="Розы"/></div>
+        <div class="field"><label>Ед. изм.</label><input name="unit" value="${_q(v("unit", "шт"))}"/></div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>Штук в пачке</label><input name="pack_size" type="number" step="1" min="0" value="${v("pack_size", 0)}"/></div>
+        <div class="field"><label>Порог «мало»</label><input name="low_stock_threshold" type="number" step="1" min="0" value="${v("low_stock_threshold", 10)}"/></div>
+      </div>
+      <div class="field"><label>Поставщик</label><input name="supplier" value="${_q(v("supplier"))}"/></div>
+      ${!s ? `<div class="field"><label>Начальный остаток (шт)</label><input name="quantity" type="number" step="1" value="0"/></div>` : ""}
+      <div class="form-actions">
+        <button type="button" class="btn btn-secondary" data-close="stock-action">Отмена</button>
+        <button type="submit" class="btn btn-primary">Сохранить</button>
+      </div>
+    </form>
+    ${s ? `
+      <div class="stock-adjust">
+        <div class="stock-adjust-title">Остаток: <b id="si-qty">${_num(s.quantity)} ${s.unit}</b></div>
+        <div class="field-row">
+          <div class="field"><label>Кол-во</label><input id="si-adj-qty" type="number" step="1" min="0" placeholder="0"/></div>
+          <div class="field"><label>Комментарий</label><input id="si-adj-note" placeholder="напр. увяли"/></div>
+        </div>
+        <div class="form-actions">
+          <button type="button" class="btn btn-outline btn-sm" id="si-income">+ Приход</button>
+          <button type="button" class="btn btn-outline btn-sm" id="si-writeoff">− Списать</button>
+        </div>
+        <button type="button" class="btn btn-danger btn-block" id="si-delete" style="margin-top:12px;">Удалить позицию</button>
+      </div>` : ""}
+  `;
+  document.querySelectorAll("#stock-action-content [data-close]").forEach((b) => b.addEventListener("click", () => closeSheet("stock-action")));
+
+  el("stock-item-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const body = {
+      name: fd.get("name"), flower_type: fd.get("flower_type") || "", unit: fd.get("unit") || "шт",
+      pack_size: parseFloat(fd.get("pack_size")) || 0,
+      low_stock_threshold: parseFloat(fd.get("low_stock_threshold")) || 0,
+      supplier: fd.get("supplier") || "",
+    };
+    try {
+      let saved;
+      if (s) {
+        saved = await apiFetch(`/api/admin/stock/${s.id}`, { method: "PUT", body, tg });
+      } else {
+        body.location_id = LOCATION_ID;
+        body.quantity = parseFloat(fd.get("quantity")) || 0;
+        saved = await apiFetch("/api/admin/stock", { method: "POST", body, tg });
+      }
+      const photoFile = fd.get("photo");
+      if (photoFile && photoFile.size > 0) {
+        const pf = new FormData(); pf.append("photo", photoFile);
+        await fetch(`/api/admin/stock/${saved.id}/photo`, { method: "POST", headers: { "X-Telegram-Init-Data": tg.initData }, body: pf });
+      }
+      showToast("Сохранено");
+      closeSheet("stock-action");
+      await loadStock(); renderStock();
+    } catch { showToast("Не удалось сохранить"); }
+  });
+
+  if (s) {
+    const adjust = async (type) => {
+      const qty = parseFloat(el("si-adj-qty").value);
+      if (!qty || qty <= 0) { showToast("Укажите количество"); return; }
+      try {
+        const upd = await apiFetch(`/api/admin/stock/${s.id}/${type}`, {
+          method: "POST", body: { quantity: qty, note: el("si-adj-note").value || (type === "income" ? "приход" : "списание") }, tg,
+        });
+        el("si-qty").textContent = `${_num(upd.quantity)} ${upd.unit}`;
+        el("si-adj-qty").value = "";
+        showToast("Склад обновлён");
+        await loadStock();
+      } catch { showToast("Не удалось обновить"); }
+    };
+    el("si-income").addEventListener("click", () => adjust("income"));
+    el("si-writeoff").addEventListener("click", () => adjust("writeoff"));
+    el("si-delete").addEventListener("click", () => {
+      const doDel = async () => {
+        try {
+          await apiFetch(`/api/admin/stock/${s.id}`, { method: "DELETE", tg });
+          showToast("Удалено"); closeSheet("stock-action"); await loadStock(); renderStock();
+        } catch (err) { showToast(err?.data?.detail || "Не удалось удалить"); }
+      };
+      if (tg.showConfirm) tg.showConfirm(`Удалить «${s.name}» со склада?`, (ok) => { if (ok) doDel(); });
+      else doDel();
+    });
+  }
+  openSheet("stock-action");
+}
+
+el("add-stock-btn").addEventListener("click", () => openStockItem(null));
+
+// --- Приёмка: массовый приход по калькулятору пачек ---
+function intakeRowHtml(s) {
+  return `
+    <div class="intake-row" data-flower="${s.id}">
+      <div class="intake-row-head">
+        <span class="intake-name">${s.name}</span>
+        <span class="intake-current">склад: ${_num(s.quantity)} ${s.unit}</span>
+      </div>
+      <div class="intake-batches">
+        <div class="intake-batch">
+          <input class="ib-packs" type="number" min="0" step="1" placeholder="пачек"/><span>×</span>
+          <input class="ib-size" type="number" min="0" step="1" placeholder="шт/пачка" value="${s.pack_size || ""}"/>
         </div>
       </div>
-      <div class="stock-qty ${low ? "low" : ""}">${s.quantity} ${s.unit}</div>
+      <div class="intake-row-foot">
+        <button type="button" class="intake-addbatch">+ пачки другого размера</button>
+        <label class="intake-direct">+ штук<input class="ib-direct" type="number" min="0" step="1" placeholder="0"/></label>
+        <span class="intake-total">= <b>0</b> шт</span>
+      </div>
     </div>`;
-    })
-    .join("");
-  wrap.querySelectorAll("[data-income]").forEach((b) => b.addEventListener("click", () => openStockAction(Number(b.dataset.income), "income")));
-  wrap.querySelectorAll("[data-writeoff]").forEach((b) => b.addEventListener("click", () => openStockAction(Number(b.dataset.writeoff), "writeoff")));
 }
 
-function openStockAction(stockId, type) {
-  const s = state.stock.find((x) => x.id === stockId);
-  el("stock-action-content").innerHTML = `
-    <h2>${type === "income" ? "Приход поставки" : "Списание"}: ${s.name}</h2>
-    <div class="stock-meta" style="margin-bottom:12px;">Сейчас на складе: ${s.quantity} ${s.unit}</div>
-    <form id="stock-action-form">
-      <div class="field"><label>Количество (${s.unit})</label><input name="quantity" type="number" step="0.01" min="0.01" required/></div>
-      <div class="field"><label>Комментарий</label><input name="note" placeholder="${type === "income" ? "Например: поставка из Нидерландов" : "Например: увяли, брак"}"/></div>
-      <div class="form-actions">
-        <button type="button" class="btn btn-secondary" data-close="stock-action">Отмена</button>
-        <button type="submit" class="btn btn-primary">${type === "income" ? "Добавить" : "Списать"}</button>
-      </div>
-    </form>
-  `;
-  document.querySelectorAll("#stock-action-content [data-close]").forEach((b) => b.addEventListener("click", () => closeSheet("stock-action")));
-  el("stock-action-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const fd = new FormData(e.target);
-    try {
-      await apiFetch(`/api/admin/stock/${stockId}/${type}`, {
-        method: "POST",
-        body: { quantity: parseFloat(fd.get("quantity")), note: fd.get("note") },
-        tg,
+function openIntake() {
+  const groups = {};
+  state.stock.forEach((s) => { (groups[_stockGroup(s)] ||= []).push(s); });
+  const groupHtml = Object.keys(groups).sort((a, b) => a.localeCompare(b, "ru")).map((g) => {
+    const rows = groups[g].sort((a, b) => (a.name || "").localeCompare(b.name || "", "ru")).map(intakeRowHtml).join("");
+    return `
+      <div class="stock-group collapsed">
+        <button class="stock-group-head" type="button"><span>${g} <span class="cnt">${groups[g].length}</span></span><span class="chev">▾</span></button>
+        <div class="stock-group-body">${rows}</div>
+      </div>`;
+  }).join("");
+  el("stock-intake-content").innerHTML = `
+    <h2>Приёмка поставки</h2>
+    <div class="intake-hint">Сколько пришло: пачек × штук в пачке (можно несколько партий) или штук напрямую. Итог посчитается сам.</div>
+    <div id="intake-groups">${groupHtml || '<div class="empty-state">Склад пуст</div>'}</div>
+    <div class="form-actions intake-actions">
+      <button type="button" class="btn btn-secondary" data-close="stock-intake">Закрыть</button>
+      <button type="button" class="btn btn-primary" id="intake-submit">Оприходовать</button>
+    </div>`;
+  const content = el("stock-intake-content");
+  const recalc = (row) => {
+    let total = 0;
+    row.querySelectorAll(".intake-batch").forEach((b) => {
+      total += (parseFloat(b.querySelector(".ib-packs").value) || 0) * (parseFloat(b.querySelector(".ib-size").value) || 0);
+    });
+    total += parseFloat(row.querySelector(".ib-direct").value) || 0;
+    row.querySelector(".intake-total b").textContent = _num(total);
+    row.dataset.total = total;
+  };
+  content.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", () => closeSheet("stock-intake")));
+  content.querySelectorAll(".stock-group-head").forEach((h) => h.addEventListener("click", () => h.parentElement.classList.toggle("collapsed")));
+  content.addEventListener("input", (e) => { const row = e.target.closest(".intake-row"); if (row) recalc(row); });
+  content.querySelectorAll(".intake-addbatch").forEach((btn) => btn.addEventListener("click", () => {
+    const batches = btn.closest(".intake-row").querySelector(".intake-batches");
+    const div = document.createElement("div");
+    div.className = "intake-batch";
+    div.innerHTML = `<input class="ib-packs" type="number" min="0" step="1" placeholder="пачек"/><span>×</span><input class="ib-size" type="number" min="0" step="1" placeholder="шт/пачка"/>`;
+    batches.appendChild(div);
+  }));
+  el("intake-submit").addEventListener("click", async () => {
+    const items = [];
+    content.querySelectorAll(".intake-row").forEach((row) => {
+      const batches = [];
+      row.querySelectorAll(".intake-batch").forEach((b) => {
+        const packs = parseFloat(b.querySelector(".ib-packs").value) || 0;
+        const size = parseFloat(b.querySelector(".ib-size").value) || 0;
+        if (packs > 0 && size > 0) batches.push({ packs, pack_size: size });
       });
-      showToast("Склад обновлён");
-      closeSheet("stock-action");
-      await loadStock();
-      renderStock();
-    } catch {
-      showToast("Не удалось обновить склад");
-    }
+      const direct = parseFloat(row.querySelector(".ib-direct").value) || 0;
+      if (batches.length || direct > 0) items.push({ flower_id: Number(row.dataset.flower), batches, direct_stems: direct });
+    });
+    if (!items.length) { showToast("Ничего не введено"); return; }
+    try {
+      await apiFetch("/api/admin/stock/intake", { method: "POST", body: { items }, tg });
+      showToast("Оприходовано ✓");
+      closeSheet("stock-intake");
+      await loadStock(); renderStock();
+    } catch { showToast("Не удалось оприходовать"); }
   });
-  openSheet("stock-action");
+  openSheet("stock-intake");
 }
-
-el("add-stock-btn").addEventListener("click", () => {
-  el("stock-action-content").innerHTML = `
-    <h2>Новая позиция на складе</h2>
-    <form id="new-stock-form">
-      <div class="field"><label>Название</label><input name="name" required placeholder="Роза Ecuador белая 60см"/></div>
-      <div class="field-row">
-        <div class="field"><label>Ед. изм.</label><input name="unit" value="шт"/></div>
-        <div class="field"><label>Начальный остаток</label><input name="quantity" type="number" step="0.01" value="0"/></div>
-      </div>
-      <div class="field"><label>Порог низкого остатка</label><input name="low_stock_threshold" type="number" value="10"/></div>
-      <div class="field"><label>Поставщик</label><input name="supplier"/></div>
-      <div class="form-actions">
-        <button type="button" class="btn btn-secondary" data-close="stock-action">Отмена</button>
-        <button type="submit" class="btn btn-primary">Добавить</button>
-      </div>
-    </form>
-  `;
-  document.querySelectorAll("#stock-action-content [data-close]").forEach((b) => b.addEventListener("click", () => closeSheet("stock-action")));
-  el("new-stock-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const fd = new FormData(e.target);
-    try {
-      await apiFetch("/api/admin/stock", {
-        method: "POST",
-        body: {
-          location_id: LOCATION_ID, name: fd.get("name"), unit: fd.get("unit") || "шт",
-          quantity: parseFloat(fd.get("quantity")) || 0,
-          low_stock_threshold: parseFloat(fd.get("low_stock_threshold")) || 10,
-          supplier: fd.get("supplier"),
-        },
-        tg,
-      });
-      showToast("Позиция добавлена");
-      closeSheet("stock-action");
-      await loadStock();
-      renderStock();
-    } catch {
-      showToast("Не удалось добавить позицию");
-    }
-  });
-  openSheet("stock-action");
-});
 
 // ---------------------------------------------------------------------
 // Настройки: категории, персонал, магазин (только владелец)

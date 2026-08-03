@@ -79,13 +79,53 @@
 .catalog-row .cr-actions { display: flex; gap: 6px; }
 
 /* --- склад --- */
-.stock-row { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; }
+.stock-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+.stock-toolbar #stock-search { flex: 1; padding: 10px 12px; border: 1.5px solid var(--border); border-radius: 10px; background: var(--surface-2); font: inherit; color: var(--ink); }
+.stock-toolbar #stock-search:focus { outline: none; border-color: var(--petrol); }
+
+.stock-group { margin-bottom: 10px; }
+.stock-group-head { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; font: inherit; font-weight: 700; color: var(--ink); cursor: pointer; }
+.stock-group-head .cnt { color: var(--ink-muted); font-weight: 600; font-size: 13px; }
+.stock-group-head .chev { transition: transform .15s; color: var(--ink-muted); }
+.stock-group.collapsed .chev { transform: rotate(-90deg); }
+.stock-group-body { display: flex; flex-direction: column; gap: 8px; padding: 8px 0 2px; }
+.stock-group.collapsed .stock-group-body { display: none; }
+
+.stock-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; cursor: pointer; }
+.stock-row:active { transform: scale(0.995); }
 .stock-row.low { border-color: var(--danger); background: rgba(194,59,59,0.05); }
+.stock-thumb { width: 44px; height: 44px; flex: none; border-radius: 10px; overflow: hidden; background: var(--surface); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; }
+.stock-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.stock-thumb .ph { font-size: 20px; opacity: .5; }
+.stock-row-main { flex: 1; min-width: 0; }
 .stock-name { font-weight: 600; font-size: 13.5px; }
 .stock-meta { font-size: 11.5px; color: var(--ink-muted); margin-top: 2px; }
-.stock-qty { font-weight: 700; font-size: 15px; }
+.stock-qty { font-weight: 700; font-size: 15px; white-space: nowrap; }
 .stock-qty.low { color: var(--danger); }
-.stock-actions { display: flex; gap: 6px; margin-top: 8px; }
+
+.stock-edit-photo { width: 100%; max-height: 180px; object-fit: cover; border-radius: 12px; margin-bottom: 12px; }
+.stock-adjust { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border); }
+.stock-adjust-title { font-size: 13px; color: var(--ink-muted); margin-bottom: 10px; }
+.btn-danger { background: var(--danger); color: #fff; border: none; }
+.btn-block { display: block; width: 100%; }
+
+/* приёмка */
+.intake-hint { font-size: 12.5px; color: var(--ink-muted); margin-bottom: 14px; line-height: 1.4; }
+.intake-actions { position: sticky; bottom: 0; background: var(--surface); padding-top: 10px; }
+.intake-row { padding: 10px 0; border-bottom: 1px solid var(--border); }
+.intake-row-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.intake-name { font-weight: 600; font-size: 13.5px; }
+.intake-current { font-size: 11.5px; color: var(--ink-muted); white-space: nowrap; }
+.intake-batches { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+.intake-batch { display: flex; align-items: center; gap: 8px; }
+.intake-batch input { width: 100%; padding: 8px 10px; border: 1.5px solid var(--border); border-radius: 9px; background: var(--surface-2); font: inherit; color: var(--ink); }
+.intake-batch span { color: var(--ink-muted); }
+.intake-row-foot { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.intake-addbatch { background: none; border: none; color: var(--petrol); font: inherit; font-size: 12.5px; cursor: pointer; padding: 0; }
+.intake-direct { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink-muted); }
+.intake-direct input { width: 64px; padding: 6px 8px; border: 1.5px solid var(--border); border-radius: 8px; background: var(--surface-2); font: inherit; color: var(--ink); }
+.intake-total { margin-left: auto; font-size: 13px; }
+.intake-total b { font-size: 15px; }
 
 /* --- формы в шитах --- */
 .form-actions { display: flex; gap: 10px; margin-top: 18px; }
