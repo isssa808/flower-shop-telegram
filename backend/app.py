@@ -92,6 +92,12 @@ def bootstrap():
     _add_column_if_missing(conn, "orders", "assembled_at", "TEXT")
     _add_column_if_missing(conn, "orders", "handed_at", "TEXT")
     _add_column_if_missing(conn, "orders", "delivered_at", "TEXT")
+    # Приём заказа (кто/когда), защита от двойного возврата склада, флаги напоминаний.
+    _add_column_if_missing(conn, "orders", "accepted_at", "TEXT")
+    _add_column_if_missing(conn, "orders", "accepted_by", "TEXT")
+    _add_column_if_missing(conn, "orders", "stock_returned", "INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing(conn, "orders", "stale_reminded", "INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing(conn, "orders", "slot_reminded", "INTEGER NOT NULL DEFAULT 0")
 
     # Разовая зачистка файла-метки, оставшегося после диагностики персистентности.
     try:
@@ -283,12 +289,25 @@ def enqueue_notification(chat_id, text, reply_markup=None, fallback_chat_id=None
         # Откат: доставить запасному адресу (владельцу в личку), если он другой.
         if fallback_chat_id and str(fallback_chat_id) != str(chat_id):
             enqueue_notification(fallback_chat_id, text, reply_markup)
+        else:
+            _alert_delivery_failure(chat_id, text)
     # transient — оставляем pending, досыл фоновым потоком
 
 
 # Совместимость со старым именем: обычное текстовое уведомление через outbox.
 def notify_telegram(chat_id, text):
     enqueue_notification(chat_id, text)
+
+
+def _alert_delivery_failure(failed_chat_id, text):
+    """Если уведомление клиенту/курьеру так и не доставилось (permanent) —
+    предупреждаем владельца в личку, чтобы связались вручную. Защита от петли:
+    не алертим о неудаче доставки в сам чат владельца/персонала."""
+    owner = STAFF_CHAT_ID
+    if not owner or str(failed_chat_id) == str(owner) or str(failed_chat_id) == str(resolve_staff_chat_id()):
+        return
+    first = (text or "").split("\n", 1)[0]
+    enqueue_notification(owner, f"⚠️ Не смог доставить уведомление (чат {failed_chat_id}): {first}. Свяжитесь вручную.")
 
 
 def _notify_process_pending():
@@ -302,12 +321,14 @@ def _notify_process_pending():
     conn.close()
     for r in rows:
         status = _send_message_api(r["chat_id"], r["text"], r["reply_markup"])
+        alert = False
         conn = get_db()
         if status == "ok":
             conn.execute("UPDATE notifications SET status='sent', attempts=attempts+1 WHERE id=?", (r["id"],))
         elif status == "permanent":
             conn.execute("UPDATE notifications SET status='failed', attempts=attempts+1 WHERE id=?", (r["id"],))
             app.logger.error(f"[notify give up] id={r['id']} chat={r['chat_id']} (постоянная ошибка)")
+            alert = True
         else:  # transient / skip — считаем попытку, дойдём до лимита и сдадимся
             new_attempts = r["attempts"] + 1
             new_status = "failed" if new_attempts >= NOTIFY_MAX_ATTEMPTS else "pending"
@@ -317,8 +338,11 @@ def _notify_process_pending():
             )
             if new_status == "failed":
                 app.logger.error(f"[notify give up] id={r['id']} chat={r['chat_id']}")
+                alert = True
         conn.commit()
         conn.close()
+        if alert:
+            _alert_delivery_failure(r["chat_id"], r["text"])
 
 
 def _notify_retry_loop():
@@ -335,6 +359,94 @@ def start_notify_thread():
         return
     threading.Thread(target=_notify_retry_loop, daemon=True).start()
     print("[notify] outbox-поток запущен (досыл pending раз в 15с)", flush=True)
+
+
+# --------------------------------------------------------------------------
+# Напоминания и алерты: зависшие непринятые заказы и приближающиеся слоты
+# доставки. Разовые (флаги в orders), фоновым потоком раз в 60с.
+# --------------------------------------------------------------------------
+STALE_NEW_MINUTES = 15
+SLOT_REMIND_MINUTES = 60
+
+
+def _mark_order_flag(order_id, col):
+    conn = get_db()
+    conn.execute(f"UPDATE orders SET {col}=1 WHERE id=?", (order_id,))
+    conn.commit()
+    conn.close()
+
+
+def _staff_telegram_id(staff_id):
+    conn = get_db()
+    row = conn.execute("SELECT telegram_id FROM staff WHERE id=?", (staff_id,)).fetchone()
+    conn.close()
+    return row["telegram_id"] if row else None
+
+
+def _reminders_sweep():
+    """Разовые напоминания: зависшие непринятые заказы и приближающиеся слоты."""
+    conn = get_db()
+    try:
+        # Возраст от STALE_NEW_MINUTES до 12ч: свежие непринятые заказы. Старые
+        # (напр. брошенные тестовые) не пингуем — «примите сейчас» уже неактуально.
+        stale = conn.execute(
+            "SELECT id FROM orders WHERE status='new' "
+            "AND (stale_reminded IS NULL OR stale_reminded=0) "
+            "AND (julianday('now') - julianday(created_at)) * 1440 BETWEEN ? AND 720",
+            (STALE_NEW_MINUTES,),
+        ).fetchall()
+        today = _batumi_today_str()
+        slot_rows = conn.execute(
+            "SELECT id, delivery_slot, assigned_staff_id FROM orders "
+            "WHERE fulfillment_type='delivery' AND status NOT IN ('delivered','cancelled') "
+            "AND (slot_reminded IS NULL OR slot_reminded=0) AND delivery_date=?",
+            (today,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    for r in stale:
+        enqueue_notification(
+            resolve_staff_chat_id(),
+            f"⏰ Заказ #{r['id']} не принят уже {STALE_NEW_MINUTES} мин — гляньте, пожалуйста.",
+            fallback_chat_id=STAFF_CHAT_ID,
+        )
+        _mark_order_flag(r["id"], "stale_reminded")
+
+    now = _batumi_now()
+    now_min = now.tm_hour * 60 + now.tm_min
+    for r in slot_rows:
+        start = _parse_hhmm((r["delivery_slot"] or "").split("-")[0])
+        if start is None:
+            continue
+        diff = start - now_min
+        if 0 <= diff <= SLOT_REMIND_MINUTES:
+            text = f"🚚 Через ~{diff} мин доставка заказа #{r['id']} ({r['delivery_slot']})."
+            enqueue_notification(resolve_staff_chat_id(), text, fallback_chat_id=STAFF_CHAT_ID)
+            if r["assigned_staff_id"]:
+                c = _staff_telegram_id(r["assigned_staff_id"])
+                if c:
+                    enqueue_notification(c, text)
+            _mark_order_flag(r["id"], "slot_reminded")
+
+
+def _reminders_loop():
+    # sleep ПЕРЕД первым проходом: поток стартует из середины модуля, а
+    # _reminders_sweep обращается к функциям, объявленным ниже по файлу — даём
+    # модулю догрузиться (напоминания не срочны при старте).
+    while True:
+        time.sleep(60)
+        try:
+            _reminders_sweep()
+        except Exception as e:
+            app.logger.warning(f"[reminders] {e}")
+
+
+def start_reminders_thread():
+    if BOT_TOKEN == "LOCAL_DEV_TOKEN":
+        return
+    threading.Thread(target=_reminders_loop, daemon=True).start()
+    print("[reminders] поток напоминаний запущен (раз в 60с)", flush=True)
 
 
 # Чат/канал персонала для новых заказов. Если не задан — шлём владельцу в личку
@@ -370,6 +482,23 @@ def _tg_call(method, payload):
     except (urllib.error.URLError, TimeoutError, ValueError) as e:
         app.logger.warning(f"[bot setup failed] {method}: {e}")
         return False
+
+
+def _edit_message_text(chat_id, message_id, text):
+    """Меняем текст ранее отправленного сообщения (и убираем у него кнопки —
+    editMessageText без reply_markup снимает инлайн-клавиатуру)."""
+    if not chat_id or not message_id:
+        return
+    _tg_call("editMessageText", {"chat_id": chat_id, "message_id": message_id, "text": text})
+
+
+def _answer_callback(cq_id, text=None, alert=False):
+    """Ответ на нажатие инлайн-кнопки: всплывашка видна только нажавшему."""
+    payload = {"callback_query_id": cq_id}
+    if text:
+        payload["text"] = text
+        payload["show_alert"] = alert
+    _tg_call("answerCallbackQuery", payload)
 
 
 def setup_bot_menu():
@@ -415,6 +544,43 @@ def _bot_send_button(chat_id, text, button_text, url):
     })
 
 
+def _handle_callback(cq):
+    """Обработка нажатий инлайн-кнопок «Принять/Отменить» под заказом. Жать могут
+    только сотрудники owner/florist (сверка telegram_id по таблице staff)."""
+    cq_id = cq.get("id")
+    data = cq.get("data") or ""
+    from_id = str((cq.get("from") or {}).get("id", ""))
+    msg = cq.get("message") or {}
+    chat_id = (msg.get("chat") or {}).get("id")
+    msg_id = msg.get("message_id")
+    action, _, oid = data.partition(":")
+    if action not in ("accept", "cancel") or not oid.isdigit():
+        return _answer_callback(cq_id)
+    order_id = int(oid)
+    conn = get_db()
+    staff = conn.execute("SELECT * FROM staff WHERE telegram_id=?", (from_id,)).fetchone()
+    o = conn.execute("SELECT status FROM orders WHERE id=?", (order_id,)).fetchone()
+    conn.close()
+    if not staff or staff["role"] not in ("owner", "florist"):
+        return _answer_callback(cq_id, "Недостаточно прав", alert=True)
+    if not o:
+        return _answer_callback(cq_id, "Заказ не найден", alert=True)
+    if action == "accept" and o["status"] != "new":
+        return _answer_callback(cq_id, "Заказ уже обработан", alert=True)
+    if action == "cancel" and o["status"] in ("delivered", "cancelled"):
+        return _answer_callback(cq_id, "Заказ уже обработан", alert=True)
+    new_status = "assembling" if action == "accept" else "cancelled"
+    updated, err = change_order_status(order_id, new_status, actor_name=staff["name"], notify_staff=False)
+    if err:
+        return _answer_callback(cq_id, err, alert=True)
+    word = "✅ Принял" if action == "accept" else "✖️ Отменил"
+    extra = f"\n\n{word}: {staff['name']}, {_batumi_stamp()}"
+    if action == "cancel":
+        extra += " · склад возвращён"
+    _edit_message_text(chat_id, msg_id, ((msg.get("text") or "").rstrip()) + extra)
+    _answer_callback(cq_id, "Принято ✓" if action == "accept" else "Отменено ✓")
+
+
 def _bot_poll_loop():
     offset = 0
     api = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
@@ -429,6 +595,13 @@ def _bot_poll_loop():
             continue
         for upd in result.get("result", []):
             offset = upd["update_id"] + 1
+            cq = upd.get("callback_query")
+            if cq:
+                try:
+                    _handle_callback(cq)
+                except Exception as e:
+                    print(f"[bot] ошибка обработки кнопки: {e}", flush=True)
+                continue
             msg = upd.get("message")
             if not msg or "text" not in msg:
                 continue
@@ -471,6 +644,7 @@ def start_bot_thread():
 setup_bot_menu()
 start_bot_thread()
 start_notify_thread()
+start_reminders_thread()
 
 
 # --------------------------------------------------------------------------
@@ -946,6 +1120,14 @@ def format_order_message(order, items):
     return "\n".join(lines)
 
 
+def _order_action_markup(order_id):
+    """Инлайн-кнопки под уведомлением о новом заказе: приём/отмена прямо из чата."""
+    return {"inline_keyboard": [[
+        {"text": "✅ Принять", "callback_data": f"accept:{order_id}"},
+        {"text": "✖️ Отменить", "callback_data": f"cancel:{order_id}"},
+    ]]}
+
+
 @app.route("/api/orders", methods=["POST"])
 @require_auth
 def api_create_order():
@@ -1048,6 +1230,7 @@ def api_create_order():
     )
     order_id = cur.lastrowid
 
+    oversold = []
     for product_id, name, label, price, qty in resolved_items:
         cur.execute(
             "INSERT INTO order_items (order_id, product_id, product_name, variant_label, price, quantity) "
@@ -1070,6 +1253,11 @@ def api_create_order():
                 "VALUES (?, 'sale', ?, ?)",
                 (r["flower_stock_id"], need, f"заказ #{order_id}"),
             )
+            left = cur.execute(
+                "SELECT quantity, name FROM flower_stock WHERE id = ?", (r["flower_stock_id"],)
+            ).fetchone()
+            if left and left["quantity"] < 0:
+                oversold.append(left["name"])
 
     # Полную строку заказа читаем обратно для богатого уведомления.
     order_row = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
@@ -1085,8 +1273,16 @@ def api_create_order():
     enqueue_notification(
         resolve_staff_chat_id(),
         format_order_message(dict(order_row), [dict(i) for i in item_rows]),
+        reply_markup=_order_action_markup(order_id),
         fallback_chat_id=STAFF_CHAT_ID,
     )
+    # Мягкое предупреждение персоналу, если списание ушло в минус (не хватает склада).
+    if oversold:
+        enqueue_notification(
+            resolve_staff_chat_id(),
+            f"⚠️ Заказ #{order_id}: не хватает на складе — {', '.join(sorted(set(oversold)))}. Пополните склад.",
+            fallback_chat_id=STAFF_CHAT_ID,
+        )
     return jsonify({"id": order_id, "total": total, "delivery_fee": delivery_fee,
                     "items_total": items_total, "status": "new"}), 201
 
@@ -1580,6 +1776,95 @@ def _batumi_stamp():
     return f"{n.tm_year:04d}-{n.tm_mon:02d}-{n.tm_mday:02d} {n.tm_hour:02d}:{n.tm_min:02d}"
 
 
+def _transition_allowed(cur_status, new_status):
+    """Разрешаем только движение вперёд по цепочке + отмену активного заказа.
+    Нельзя откатывать статус и нельзя менять уже завершённый (доставлен/отменён)."""
+    chain = ["new", "assembling", "assembled", "out_for_delivery", "delivered"]
+    if cur_status in ("delivered", "cancelled"):
+        return False, "Заказ уже завершён — статус менять нельзя"
+    if new_status == cur_status:
+        return True, None
+    if new_status == "cancelled":
+        return True, None
+    if cur_status in chain and new_status in chain and chain.index(new_status) > chain.index(cur_status):
+        return True, None
+    return False, "Нельзя вернуть статус назад"
+
+
+def _restore_stock(conn, order_id):
+    """Возврат списанного при создании склада при отмене заказа. Идемпотентно
+    (флаг orders.stock_returned) — повторный вызов ничего не делает."""
+    row = conn.execute("SELECT stock_returned FROM orders WHERE id=?", (order_id,)).fetchone()
+    if not row or (row["stock_returned"] or 0):
+        return False
+    items = conn.execute(
+        "SELECT product_id, quantity FROM order_items WHERE order_id=?", (order_id,)
+    ).fetchall()
+    for it in items:
+        if not it["product_id"]:
+            continue
+        recipe = conn.execute(
+            "SELECT flower_stock_id, quantity_needed FROM product_recipe WHERE product_id=?",
+            (it["product_id"],),
+        ).fetchall()
+        for r in recipe:
+            back = r["quantity_needed"] * it["quantity"]
+            conn.execute("UPDATE flower_stock SET quantity = quantity + ? WHERE id=?",
+                         (back, r["flower_stock_id"]))
+            conn.execute(
+                "INSERT INTO stock_movements (flower_stock_id, movement_type, quantity, note) "
+                "VALUES (?, 'return', ?, ?)",
+                (r["flower_stock_id"], back, f"отмена #{order_id}"),
+            )
+    conn.execute("UPDATE orders SET stock_returned=1 WHERE id=?", (order_id,))
+    return True
+
+
+def change_order_status(order_id, new_status, actor_name=None, notify_staff=True):
+    """Единая точка смены статуса: валидация перехода, отметки времени, отметка
+    приёма, возврат склада при отмене и уведомления. Используется и HTTP-эндпоинтом,
+    и кнопками в Telegram. Возвращает (order_dict|None, err|None): err!=None — переход
+    отклонён (order_dict — текущее состояние); order_dict=None — заказ не найден."""
+    conn = get_db()
+    order = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
+    if not order:
+        conn.close()
+        return None, "not found"
+    cur_status = order["status"]
+    ok, err = _transition_allowed(cur_status, new_status)
+    if not ok:
+        conn.close()
+        return dict(order), err
+    if new_status == cur_status:
+        conn.close()
+        return dict(order), None
+    conn.execute("UPDATE orders SET status=? WHERE id=?", (new_status, order_id))
+    ts_col = STATUS_TIMESTAMP_COL.get(new_status)
+    if ts_col:
+        conn.execute(
+            f"UPDATE orders SET {ts_col}=? WHERE id=? AND ({ts_col} IS NULL OR {ts_col}='')",
+            (_batumi_stamp(), order_id),
+        )
+    if cur_status == "new" and new_status != "cancelled":
+        conn.execute(
+            "UPDATE orders SET accepted_at=?, accepted_by=? WHERE id=? "
+            "AND (accepted_at IS NULL OR accepted_at='')",
+            (_batumi_stamp(), actor_name or "", order_id),
+        )
+    if new_status == "cancelled":
+        _restore_stock(conn, order_id)
+    conn.commit()
+    updated = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
+    conn.close()
+    label = STATUS_LABELS_RU.get(new_status, new_status)
+    if updated["customer_tg_id"]:
+        enqueue_notification(updated["customer_tg_id"], f"Статус заказа #{order_id}: {label}")
+    if notify_staff:
+        enqueue_notification(resolve_staff_chat_id(), f"Заказ #{order_id}: статус → {label}",
+                             fallback_chat_id=STAFF_CHAT_ID)
+    return dict(updated), None
+
+
 @app.route("/api/admin/orders/<int:order_id>/status", methods=["PUT"])
 @require_staff
 def api_admin_order_status(order_id):
@@ -1587,38 +1872,21 @@ def api_admin_order_status(order_id):
     status = body.get("status")
     if status not in VALID_STATUSES:
         return jsonify({"error": "invalid status", "valid": VALID_STATUSES}), 400
-    conn = get_db()
     # Курьер может отметить только «Доставлен» и только на своём заказе.
     if g.staff.get("role") == "courier":
+        conn = get_db()
         row = conn.execute("SELECT assigned_staff_id FROM orders WHERE id=?", (order_id,)).fetchone()
+        conn.close()
         if not row or row["assigned_staff_id"] != g.staff["id"]:
-            conn.close()
             return jsonify({"error": "forbidden", "detail": "Это не ваш заказ"}), 403
         if status != "delivered":
-            conn.close()
             return jsonify({"error": "forbidden", "detail": "Курьер может отметить только «Доставлен»"}), 403
-    conn.execute(
-        "UPDATE orders SET status=?, assigned_staff_id=COALESCE(?, assigned_staff_id) WHERE id=?",
-        (status, body.get("assigned_staff_id"), order_id),
-    )
-    # Отметка времени перехода (только если ещё не стояла — не перетираем при повторе).
-    ts_col = STATUS_TIMESTAMP_COL.get(status)
-    if ts_col:
-        conn.execute(
-            f"UPDATE orders SET {ts_col}=? WHERE id=? AND ({ts_col} IS NULL OR {ts_col}='')",
-            (_batumi_stamp(), order_id),
-        )
-    conn.commit()
-    order = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
-    conn.close()
-    if order:
-        label = STATUS_LABELS_RU.get(status, status)
-        # Клиенту — в личку, персоналу — в общий чат (не только владельцу).
-        if order["customer_tg_id"]:
-            enqueue_notification(order["customer_tg_id"], f"Статус заказа #{order_id}: {label}")
-        enqueue_notification(resolve_staff_chat_id(), f"Заказ #{order_id}: статус → {label}",
-                             fallback_chat_id=STAFF_CHAT_ID)
-    return jsonify(dict(order)) if order else (jsonify({"error": "not found"}), 404)
+    updated, err = change_order_status(order_id, status, actor_name=g.staff.get("name"))
+    if updated is None:
+        return jsonify({"error": "not found"}), 404
+    if err:
+        return jsonify({"error": "invalid transition", "detail": err}), 400
+    return jsonify(updated)
 
 
 # --------------------------------------------------------------------------
@@ -1670,6 +1938,12 @@ def api_admin_order_assign(order_id):
             f"Получатель: {order['recipient_name'] or order['customer_name'] or '—'}\n"
             f"Телефон: {order['recipient_phone'] or order['customer_phone'] or '—'}",
         )
+    # Связка курьер↔статус: если заказ уже собран, назначение курьера = передача
+    # на доставку → авто-статус «Передан курьеру» (чтобы не ставить руками дважды).
+    if courier and order["status"] == "assembled":
+        advanced, _err = change_order_status(order_id, "out_for_delivery", actor_name=g.staff.get("name"))
+        if advanced is not None:
+            updated = advanced
     return jsonify(dict(updated))
 
 
