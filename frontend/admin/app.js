@@ -1231,6 +1231,17 @@ function batumiParts() {
 function orderDateKey(o) {
   return String(o.delivered_at || o.created_at || "").slice(0, 10);
 }
+// Дата+время СОЗДАНИЯ заказа в Батуми (created_at хранится в UTC) — для кассы,
+// которую считаем по дате заказа. Возвращает "YYYY-MM-DD HH:MM".
+function orderCreatedBatumi(o) {
+  const s = String(o.created_at || "").trim();
+  if (!s) return "";
+  const d = new Date(s.replace(" ", "T") + "Z");
+  if (isNaN(d)) return s.slice(0, 16);
+  const b = new Date(d.getTime() + 4 * 3600000);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${b.getUTCFullYear()}-${p(b.getUTCMonth() + 1)}-${p(b.getUTCDate())} ${p(b.getUTCHours())}:${p(b.getUTCMinutes())}`;
+}
 
 function renderSalesTabs() {
   el("sales-period-tabs").innerHTML = [["day", "День"], ["month", "Месяц"]]
@@ -1270,12 +1281,14 @@ async function renderSales() {
   const period = state.salesPeriod;
   const keyLen = period === "month" ? 7 : 10;
   const want = period === "month" ? parts.month : parts.day;
-  const dOrders = orders.filter((o) => orderDateKey(o).slice(0, keyLen) === want);
+  // Касса считается по ДАТЕ ЗАКАЗА (доставки предоплачены — деньги приходят при
+  // оформлении), в времени Батуми.
+  const dOrders = orders.filter((o) => orderCreatedBatumi(o).slice(0, keyLen) === want);
   state.salesOrders = dOrders;
 
   const events = [];
   dOrders.forEach((o) => events.push({
-    kind: "order", id: o.id, day: orderDateKey(o), when: (o.delivered_at || o.delivery_date || "").slice(11, 16),
+    kind: "order", id: o.id, day: orderCreatedBatumi(o).slice(0, 10), when: orderCreatedBatumi(o).slice(11, 16),
     title: o.items.map((i) => `${i.product_name}${i.variant_label ? ` (${i.variant_label})` : ""} ×${i.quantity}`).join(", "),
     thumb: o.items.find((i) => i.photo_url)?.photo_url || "",
     amount: o.total || 0, pay: o.payment_method, count: o.items.reduce((n, i) => n + i.quantity, 0),
