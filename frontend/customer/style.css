@@ -84,12 +84,12 @@
 .pc-tag {
   position: absolute; top: 10px; left: 10px; z-index: 3; font-size: 10px; font-weight: 800;
   text-transform: uppercase; letter-spacing: 0.05em; padding: 4px 8px; border-radius: 999px;
-  background: var(--bg); color: var(--ink);
+  background: var(--bg); color: var(--ink); box-shadow: 0 1px 4px rgba(0,0,0,0.30);
 }
 .pc-tag.made { background: var(--surface); color: var(--ink-muted); }
 .pc-tag.hit { background: var(--rose); color: #fff; }
-.pc-tag.new { background: var(--green-soft); color: var(--leaf); }
-.pc-tag.recommended { background: var(--rose-soft); color: var(--rose); }
+.pc-tag.new { background: #3e8159; color: #fff; }
+.pc-tag.recommended { background: #ce5e7e; color: #fff; }
 .pc-likes { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 700; color: var(--ink-muted); margin-top: 5px; }
 .pc-likes svg { width: 13px; height: 13px; color: var(--rose); fill: var(--rose); }
 .pc-likes .pc-orders { color: var(--faint); font-weight: 600; }
