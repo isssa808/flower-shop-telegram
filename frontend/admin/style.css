@@ -142,6 +142,9 @@
 .recipe-row { display: flex; gap: 8px; align-items: center; }
 .recipe-row .rr-target { flex: 1; min-width: 0; }
 .recipe-row .rr-qty { width: 64px; flex: none; }
+.slot-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.slot-row .sr-window { flex: 1; }
+.slot-row .sr-cap { width: 64px; flex: none; }
 /* Кнопка закрытия шторки: position:fixed попадает в трансформированный .sheet
    как в контейнер, поэтому держится в правом верхнем углу и не уезжает при
    прокрутке длинной формы. */

@@ -115,6 +115,13 @@ def bootstrap():
                 (r["product_id"], r["flower_stock_id"], r["quantity_needed"]),
             )
         conn.commit()
+    # Засев окон доставки дефолтами, если таблица пуста (дальше редактируются в админке).
+    if not conn.execute("SELECT 1 FROM delivery_slots LIMIT 1").fetchone():
+        _def_slots = ["09:00-11:00", "10:00-12:00", "12:00-14:00", "14:00-16:00",
+                      "16:00-18:00", "18:00-20:00", "20:00-22:00"]
+        for _i, _w in enumerate(_def_slots):
+            conn.execute("INSERT INTO delivery_slots (window, capacity, sort_order) VALUES (?, 2, ?)", (_w, _i))
+        conn.commit()
 
     # Разовая зачистка файла-метки, оставшегося после диагностики персистентности.
     try:
@@ -829,23 +836,29 @@ def slot_taken_count(conn, date, slot):
     ).fetchone()["c"]
 
 
+def get_delivery_slots(conn):
+    """Окна доставки из БД (редактируются в админке): [{window, capacity}] по порядку."""
+    rows = conn.execute("SELECT window, capacity FROM delivery_slots ORDER BY sort_order, id").fetchall()
+    return [{"window": r["window"], "capacity": max(1, r["capacity"] or 1)} for r in rows]
+
+
 def available_slots(conn, date):
-    """Свободные слоты на дату: где заказов меньше лимита. Для сегодняшней даты
+    """Свободные окна на дату: где заказов меньше ЛИМИТА ОКНА. Для сегодняшней даты
     прошедшие по времени Батуми окна исключаем (start <= текущее время)."""
-    cap = _slot_capacity()
     today = _batumi_today_str()
     now_min = None
     if date == today:
         n = _batumi_now()
         now_min = n.tm_hour * 60 + n.tm_min
     result = []
-    for slot in DELIVERY_SLOTS:
+    for s in get_delivery_slots(conn):
+        window = s["window"]
         if now_min is not None:
-            start = _parse_hhmm(slot.split("-")[0].strip())
+            start = _parse_hhmm(window.split("-")[0].strip())
             if start is not None and start <= now_min:
                 continue  # окно уже началось/прошло
-        if slot_taken_count(conn, date, slot) < cap:
-            result.append(slot)
+        if slot_taken_count(conn, date, window) < s["capacity"]:
+            result.append(window)
     return result
 
 
@@ -1154,6 +1167,32 @@ def api_slots():
     return jsonify({"date": date, "slots": slots, "capacity": _slot_capacity()})
 
 
+@app.route("/api/admin/delivery-slots", methods=["GET", "PUT"])
+@require_owner
+def api_admin_delivery_slots():
+    """Окна доставки с индивидуальным лимитом. PUT заменяет список целиком."""
+    conn = get_db()
+    if request.method == "PUT":
+        body = request.get_json(force=True)
+        clean = []
+        for s in (body.get("slots") or []):
+            window = (s.get("window") or "").strip()
+            if "-" not in window or _parse_hhmm(window.split("-")[0].strip()) is None:
+                continue
+            try:
+                cap = max(1, int(float(s.get("capacity") or 1)))
+            except (ValueError, TypeError):
+                cap = 1
+            clean.append((window, cap))
+        conn.execute("DELETE FROM delivery_slots")
+        for i, (window, cap) in enumerate(clean):
+            conn.execute("INSERT INTO delivery_slots (window, capacity, sort_order) VALUES (?, ?, ?)", (window, cap, i))
+        conn.commit()
+    rows = conn.execute("SELECT window, capacity FROM delivery_slots ORDER BY sort_order, id").fetchall()
+    conn.close()
+    return jsonify([{"window": r["window"], "capacity": r["capacity"]} for r in rows])
+
+
 # --------------------------------------------------------------------------
 # Публичное API — заказы
 # --------------------------------------------------------------------------
@@ -1263,12 +1302,13 @@ def api_create_order():
         if not slot:
             conn.close()
             return jsonify({"error": "slot required", "detail": "Выберите время доставки"}), 400
-        if slot not in DELIVERY_SLOTS:
+        slots_cfg = {s["window"]: s["capacity"] for s in get_delivery_slots(conn)}
+        if slot not in slots_cfg:
             conn.close()
             return jsonify({"error": "invalid slot", "detail": "Выберите время из списка"}), 400
-        # Повторная проверка лимита слота перед вставкой — защита от гонки, когда
+        # Повторная проверка лимита окна перед вставкой — защита от гонки, когда
         # окно заняли между показом клиенту и оформлением.
-        if slot_taken_count(conn, delivery_date, slot) >= _slot_capacity():
+        if slot_taken_count(conn, delivery_date, slot) >= slots_cfg[slot]:
             conn.close()
             return jsonify({"error": "slot full",
                             "detail": "Это время только что заняли, выберите другое"}), 409

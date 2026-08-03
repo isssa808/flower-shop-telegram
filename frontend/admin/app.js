@@ -1034,7 +1034,12 @@ el("add-staff-btn").addEventListener("click", () => openStaffEdit(null));
 
 // --- Магазин и уведомления ---
 async function loadSettings() {
-  state.settings = await apiFetch("/api/admin/settings", { tg });
+  const [settings, slots] = await Promise.all([
+    apiFetch("/api/admin/settings", { tg }),
+    apiFetch("/api/admin/delivery-slots", { tg }),
+  ]);
+  state.settings = settings;
+  state.deliverySlots = slots;
 }
 
 const esc = (v) => String(v == null ? "" : v).replace(/"/g, "&quot;");
@@ -1058,8 +1063,12 @@ function renderSettings() {
           <div class="field"><label>Дневной тариф, ₾</label><input name="delivery_fee_day" type="number" step="1" value="${esc(s.delivery_fee_day)}"/></div>
           <div class="field"><label>Ночной тариф, ₾</label><input name="delivery_fee_night" type="number" step="1" value="${esc(s.delivery_fee_night)}"/></div>
         </div>
-        <div class="field"><label>Лимит доставок на 1 слот (2 часа)</label><input name="slot_capacity" type="number" step="1" min="1" value="${esc(s.slot_capacity)}"/></div>
-        <div class="cr-meta" style="margin:-4px 0 10px;">Заказ меньше мин. суммы — только самовывоз. Дневной тариф — до «времени смены», ночной — после (приём до 00:00). Доставка только по Батуми. Когда лимит на слот исчерпан — это время исчезает у клиента.</div>
+        <div class="field">
+          <label>Окна доставки и лимит на каждое</label>
+          <div id="slots-editor"></div>
+          <button type="button" class="btn btn-outline btn-sm" id="add-slot-row">+ окно</button>
+        </div>
+        <div class="cr-meta" style="margin:-4px 0 10px;">Формат окна: 09:00-11:00. Лимит — сколько заказов принимаем на это окно; когда исчерпан, время пропадает у клиента. Заказ меньше мин. суммы — только самовывоз. Дневной тариф — до «времени смены», ночной — после (приём до 00:00). Доставка только по Батуми.</div>
 
         <h3 class="settings-group">Контакты</h3>
         <div class="field"><label>Телефон</label><input name="shop_phone" value="${esc(s.shop_phone)}" placeholder="+995 5xx xx xx xx"/></div>
@@ -1087,6 +1096,18 @@ function renderSettings() {
       </form>
     </div>
   `;
+  const slotsEditor = el("slots-editor");
+  function addSlotRow(window = "", capacity = 2) {
+    const row = document.createElement("div");
+    row.className = "slot-row";
+    row.innerHTML = `<input class="sr-window" placeholder="09:00-11:00" value="${esc(window)}"/>
+      <input class="sr-cap" type="number" min="1" step="1" value="${capacity}" title="лимит на окно"/>
+      <button type="button" class="btn-icon" data-remove-slot aria-label="Убрать">✕</button>`;
+    row.querySelector("[data-remove-slot]").addEventListener("click", () => row.remove());
+    slotsEditor.appendChild(row);
+  }
+  (state.deliverySlots || []).forEach((sl) => addSlotRow(sl.window, sl.capacity));
+  el("add-slot-row").addEventListener("click", () => addSlotRow());
   el("settings-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
@@ -1101,7 +1122,6 @@ function renderSettings() {
           delivery_fee_day: fd.get("delivery_fee_day"),
           delivery_fee_night: fd.get("delivery_fee_night"),
           delivery_day_end: fd.get("delivery_day_end"),
-          slot_capacity: fd.get("slot_capacity"),
           shop_phone: fd.get("shop_phone"),
           shop_instagram: fd.get("shop_instagram"),
           express_delivery_text: fd.get("express_delivery_text"),
@@ -1110,6 +1130,11 @@ function renderSettings() {
         },
         tg,
       });
+      const slots = [...slotsEditor.querySelectorAll(".slot-row")].map((r) => ({
+        window: r.querySelector(".sr-window").value.trim(),
+        capacity: parseInt(r.querySelector(".sr-cap").value) || 1,
+      })).filter((sl) => sl.window.includes("-"));
+      state.deliverySlots = await apiFetch("/api/admin/delivery-slots", { method: "PUT", body: { slots }, tg });
       const ct = state.settings.chat_test;
       if (ct && ct.status === "ok") {
         showToast("Сохранено ✓ В чат ушло проверочное сообщение");

@@ -136,6 +136,14 @@ CREATE TABLE IF NOT EXISTS app_settings (
     value TEXT
 );
 
+-- Окна доставки с индивидуальным лимитом заказов на окно (редактируются в админке).
+CREATE TABLE IF NOT EXISTS delivery_slots (
+    id INTEGER PRIMARY KEY,
+    window TEXT NOT NULL,               -- "09:00-11:00"
+    capacity INTEGER NOT NULL DEFAULT 2,
+    sort_order INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS favorites (
     id INTEGER PRIMARY KEY,
     tg_id TEXT NOT NULL,
