@@ -22,10 +22,13 @@ Backend Flower Batum Flower Mini App.
 import os
 import json
 import time
+import math
+import base64
 import threading
 import functools
 import urllib.request
 import urllib.error
+import urllib.parse
 from flask import Flask, request, jsonify, send_from_directory, g
 
 from models import get_db, init_db, DB_PATH
@@ -413,6 +416,7 @@ def start_notify_thread():
 # --------------------------------------------------------------------------
 STALE_NEW_MINUTES = 15
 SLOT_REMIND_MINUTES = 60
+PAYMENT_EXPIRE_MINUTES = 30  # неоплаченный онлайн-заказ авто-отменяется
 
 
 def _mark_order_flag(order_id, col):
@@ -448,8 +452,25 @@ def _reminders_sweep():
             "AND (slot_reminded IS NULL OR slot_reminded=0) AND delivery_date=?",
             (today,),
         ).fetchall()
+        # Неоплаченные онлайн-заказы старше 30 мин: авто-отмена (склад НЕ списан —
+        # ничего возвращать не нужно, просто снимаем «висящий» awaiting_payment).
+        expired_unpaid = conn.execute(
+            "SELECT id FROM orders WHERE status='awaiting_payment' "
+            "AND (julianday('now') - julianday(created_at)) * 1440 > ?",
+            (PAYMENT_EXPIRE_MINUTES,),
+        ).fetchall()
     finally:
         conn.close()
+
+    for r in expired_unpaid:
+        c = get_db()
+        try:
+            c.execute("UPDATE orders SET status='cancelled' WHERE id=? AND status='awaiting_payment'", (r["id"],))
+            c.execute("UPDATE payments SET status='expired', updated_at=? "
+                      "WHERE order_id=? AND status IN ('created','approved')", (_batumi_stamp(), r["id"]))
+            c.commit()
+        finally:
+            c.close()
 
     for r in stale:
         enqueue_notification(
@@ -787,6 +808,11 @@ SHOP_DEFAULTS = {
         "Обратите внимание: цветы живые, поэтому композиция может немного отличаться от фото "
         "по оттенку, форме и наполнению — но она будет не менее красивой."
     ),
+    # Онлайн-оплата (PayPal). Курс с зашитой комиссией задаёт владелец; пусто/0 —
+    # соответствующая валюта недоступна. paypal_enabled: "1" включает канал.
+    "paypal_enabled": "",
+    "pay_rate_eur": "",
+    "pay_rate_usd": "",
 }
 
 
@@ -810,6 +836,26 @@ def _num_setting(key):
         return float(get_setting_or_default(key))
     except (ValueError, TypeError):
         return float(SHOP_DEFAULTS.get(key, 0) or 0)
+
+
+# Валюты онлайн-оплаты: код валюты PayPal -> ключ настройки с курсом (GEL за 1 ед.).
+PAY_CURRENCIES = {"EUR": "pay_rate_eur", "USD": "pay_rate_usd"}
+
+
+def _pay_rate(currency):
+    """Курс GEL за 1 единицу валюты (с зашитой комиссией). 0/пусто = недоступна."""
+    key = PAY_CURRENCIES.get((currency or "").upper())
+    return _num_setting(key) if key else 0
+
+
+def _paypal_available():
+    """PayPal доступен: включён владельцем, задан хотя бы один курс И на сервере
+    прописаны ключи PayPal (env). Иначе кнопку оплаты не показываем."""
+    if get_setting_or_default("paypal_enabled") != "1":
+        return False
+    if not _paypal_configured():
+        return False
+    return _pay_rate("EUR") > 0 or _pay_rate("USD") > 0
 
 
 def compute_delivery_fee(slot):
@@ -1001,6 +1047,11 @@ def api_shop():
         "express_delivery_text": get_setting("express_delivery_text", ""),
         "delivery_payment_info": get_setting("delivery_payment_info", ""),
         "disclaimer_note": get_setting("disclaimer_note", ""),
+        # Онлайн-оплата: только курсы (не секреты!) — витрина показывает «≈ €X / ≈ $Y»
+        # и предлагает валюту. paypal_enabled = включено И задан хотя бы один курс.
+        "paypal_enabled": _paypal_available(),
+        "pay_rate_eur": _num_setting("pay_rate_eur"),
+        "pay_rate_usd": _num_setting("pay_rate_usd"),
     })
 
 
@@ -1306,7 +1357,8 @@ def format_order_message(order, items):
         lines.append(f"Получатель: {rn}{(', ' + rp) if rp else ''}".strip())
     if order.get("card_message"):
         lines.append(f"Открытка: {order['card_message']}")
-    pay = {"cash": "наличные", "card_courier": "карта курьеру", "transfer": "перевод"}.get(
+    pay = {"cash": "наличные", "card_courier": "карта курьеру", "transfer": "перевод",
+           "paypal": "PayPal (онлайн)"}.get(
         order.get("payment_method"), order.get("payment_method") or "—")
     lines.append(f"Оплата: {pay}")
     return "\n".join(lines)
@@ -1403,6 +1455,15 @@ def api_create_order():
 
     total = items_total + delivery_fee
 
+    # Онлайн-оплата: заказ создаётся в статусе awaiting_payment и «приходит»
+    # персоналу только после подтверждённой оплаты. Сейчас поддержан только PayPal.
+    online = body.get("payment_method") == "paypal"
+    if online and not _paypal_available():
+        conn.close()
+        return jsonify({"error": "payment unavailable",
+                        "detail": "Онлайн-оплата временно недоступна, выберите другой способ."}), 400
+    order_status = "awaiting_payment" if online else "new"
+
     # Проверка склада (учёт размеров варианта и замен-групп): не даём уйти в минус.
     stock_plan, stock_short = _plan_order_stock(
         conn, [(pid, vid, qty) for (pid, vid, nm, lb, pr, qty) in resolved_items if pid not in simple_need]
@@ -1419,8 +1480,8 @@ def api_create_order():
         """INSERT INTO orders (location_id, customer_tg_id, customer_name, customer_phone,
            fulfillment_type, address, delivery_date, delivery_slot, recipient_name,
            recipient_phone, card_message, photo_before_delivery, payment_method,
-           delivery_zone, delivery_fee, total)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           delivery_zone, delivery_fee, total, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             body.get("location_id", 1),
             str(user.get("id", "")),
@@ -1438,9 +1499,28 @@ def api_create_order():
             delivery_zone,
             delivery_fee,
             total,
+            order_status,
         ),
     )
     order_id = cur.lastrowid
+
+    # Позиции заказа пишем всегда (нужны и для активации после оплаты).
+    for product_id, variant_id, name, label, price, qty in resolved_items:
+        cur.execute(
+            "INSERT INTO order_items (order_id, product_id, variant_id, product_name, variant_label, price, quantity) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (order_id, product_id, variant_id, name, label, price, qty),
+        )
+
+    # Онлайн-оплата: заказ ждёт оплаты — НЕ назначаем курьера, НЕ списываем склад и
+    # НЕ уведомляем персонал. Всё это сделает _activate_paid_order после подтверждённой
+    # оплаты (см. _finalize_paypal), чтобы флорист не собрал неоплаченный заказ.
+    if online:
+        conn.commit()
+        conn.close()
+        return jsonify({"id": order_id, "total": total, "delivery_fee": delivery_fee,
+                        "items_total": items_total, "status": order_status,
+                        "needs_payment": True}), 201
 
     # Основной курьер: авто-назначение на доставку (один курьер на все заказы —
     # не назначаем вручную каждый). Настраивается в админке; читаем через тот же cur.
@@ -1452,12 +1532,6 @@ def api_create_order():
             if _c:
                 cur.execute("UPDATE orders SET assigned_staff_id=? WHERE id=?", (_c["id"], order_id))
 
-    for product_id, variant_id, name, label, price, qty in resolved_items:
-        cur.execute(
-            "INSERT INTO order_items (order_id, product_id, variant_id, product_name, variant_label, price, quantity) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (order_id, product_id, variant_id, name, label, price, qty),
-        )
     # Списание склада по заранее рассчитанному плану (размеры варианта + замены-группы).
     for fid, amt in stock_plan:
         cur.execute("UPDATE flower_stock SET quantity = quantity - ? WHERE id = ?", (amt, fid))
@@ -1490,6 +1564,386 @@ def api_create_order():
     )
     return jsonify({"id": order_id, "total": total, "delivery_fee": delivery_fee,
                     "items_total": items_total, "status": "new"}), 201
+
+
+# ==========================================================================
+# Онлайн-оплата — PayPal (первый провайдер; обобщённо под payments/вебхук).
+# Принципы безопасности: сумму считаем на сервере из orders.total и курса из
+# настроек; «оплачено» ставим ТОЛЬКО по факту capture, идемпотентно; заказ
+# «приходит» персоналу и списывает склад лишь после подтверждённой оплаты.
+# Секреты (client_id/secret/webhook_id) — только в env, не в БД, не в /api/shop.
+# ==========================================================================
+PAYPAL_ENV = os.environ.get("PAYPAL_ENV", "sandbox").strip().lower()
+PAYPAL_CLIENT_ID = os.environ.get("PAYPAL_CLIENT_ID", "").strip()
+PAYPAL_CLIENT_SECRET = os.environ.get("PAYPAL_CLIENT_SECRET", "").strip()
+PAYPAL_WEBHOOK_ID = os.environ.get("PAYPAL_WEBHOOK_ID", "").strip()
+PAYPAL_BASE = "https://api-m.paypal.com" if PAYPAL_ENV == "live" else "https://api-m.sandbox.paypal.com"
+
+_paypal_token_cache = {"token": None, "exp": 0}
+
+
+def _paypal_configured():
+    return bool(PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET)
+
+
+def _pay_amount(total_gel, currency):
+    """Сумма к оплате в валюте: лари / курс, округление ВВЕРХ до цента. None — недоступна."""
+    rate = _pay_rate(currency)
+    if rate <= 0:
+        return None
+    return math.ceil((float(total_gel) / rate) * 100) / 100.0
+
+
+def _paypal_http(method, path, token=None, json_body=None, form_body=None):
+    """Вызов PayPal REST. Возвращает (status_code, dict|None). Сеть/HTTP-ошибки не бросаем."""
+    url = PAYPAL_BASE + path
+    headers = {"Accept": "application/json"}
+    data = None
+    if form_body is not None:
+        data = urllib.parse.urlencode(form_body).encode()
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+    elif json_body is not None:
+        data = json.dumps(json_body).encode()
+        headers["Content-Type"] = "application/json"
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read()
+            return resp.status, (json.loads(raw) if raw else {})
+    except urllib.error.HTTPError as e:
+        try:
+            body = json.loads(e.read())
+        except Exception:
+            body = None
+        app.logger.warning(f"[paypal] {method} {path} HTTP {e.code}")
+        return e.code, body
+    except (urllib.error.URLError, TimeoutError, ValueError) as e:
+        app.logger.warning(f"[paypal] {method} {path} network: {e}")
+        return 0, None
+
+
+def _paypal_token():
+    """OAuth access_token (client_credentials) с кэшем до истечения."""
+    now = time.time()
+    if _paypal_token_cache["token"] and _paypal_token_cache["exp"] > now + 60:
+        return _paypal_token_cache["token"]
+    if not _paypal_configured():
+        return None
+    basic = base64.b64encode(f"{PAYPAL_CLIENT_ID}:{PAYPAL_CLIENT_SECRET}".encode()).decode()
+    st, body = None, None
+    url = PAYPAL_BASE + "/v1/oauth2/token"
+    data = urllib.parse.urlencode({"grant_type": "client_credentials"}).encode()
+    req = urllib.request.Request(url, data=data, headers={
+        "Authorization": f"Basic {basic}",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/json",
+    }, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            body = json.loads(resp.read())
+    except Exception as e:
+        app.logger.error(f"[paypal] token error: {e}")
+        return None
+    tok = body.get("access_token")
+    _paypal_token_cache["token"] = tok
+    _paypal_token_cache["exp"] = now + int(body.get("expires_in", 0) or 0)
+    return tok
+
+
+def _paypal_create_order(amount, currency, order_id):
+    """PayPal-заказ intent=CAPTURE. Возвращает (pp_order_id, approval_url) или (None, None)."""
+    token = _paypal_token()
+    if not token:
+        return None, None
+    conn = get_db()
+    loc = conn.execute("SELECT name FROM locations WHERE id=1").fetchone()
+    conn.close()
+    brand = (loc["name"] if loc else "") or "Flowers Batum Flower"
+    payload = {
+        "intent": "CAPTURE",
+        "purchase_units": [{
+            "custom_id": str(order_id),
+            "description": f"Order #{order_id}",
+            "amount": {"currency_code": currency, "value": f"{amount:.2f}"},
+        }],
+        "application_context": {
+            "brand_name": brand,
+            "user_action": "PAY_NOW",
+            "shipping_preference": "NO_SHIPPING",
+            "return_url": f"{APP_URL}/pay/paypal/return",
+            "cancel_url": f"{APP_URL}/pay/paypal/cancel",
+        },
+    }
+    st, body = _paypal_http("POST", "/v2/checkout/orders", token=token, json_body=payload)
+    if st not in (200, 201) or not body:
+        return None, None
+    approval = None
+    for link in body.get("links", []):
+        if link.get("rel") in ("payer-action", "approve"):
+            approval = link.get("href")
+            break
+    return body.get("id"), approval
+
+
+def _paypal_order_details(pp_order_id, token):
+    st, body = _paypal_http("GET", f"/v2/checkout/orders/{pp_order_id}", token=token)
+    return body if st == 200 else None
+
+
+def _paypal_capture(pp_order_id, token):
+    return _paypal_http("POST", f"/v2/checkout/orders/{pp_order_id}/capture", token=token, json_body={})
+
+
+def _paypal_extract_amount(data):
+    """Из ответа capture/details достаёт (value, currency_code) захваченного платежа."""
+    try:
+        pu = (data.get("purchase_units") or [])[0]
+        caps = ((pu.get("payments") or {}).get("captures") or [])
+        if caps:
+            a = caps[0].get("amount", {})
+            return float(a.get("value")), a.get("currency_code")
+        a = pu.get("amount", {})
+        return float(a.get("value")), a.get("currency_code")
+    except (IndexError, KeyError, TypeError, ValueError):
+        return None, None
+
+
+def _paypal_verify_webhook(headers, event):
+    """Проверка подписи вебхука через PayPal API. Без webhook_id — не доверяем."""
+    if not PAYPAL_WEBHOOK_ID:
+        return False
+    token = _paypal_token()
+    if not token:
+        return False
+    payload = {
+        "transmission_id": headers.get("Paypal-Transmission-Id"),
+        "transmission_time": headers.get("Paypal-Transmission-Time"),
+        "cert_url": headers.get("Paypal-Cert-Url"),
+        "auth_algo": headers.get("Paypal-Auth-Algo"),
+        "transmission_sig": headers.get("Paypal-Transmission-Sig"),
+        "webhook_id": PAYPAL_WEBHOOK_ID,
+        "webhook_event": event,
+    }
+    st, body = _paypal_http("POST", "/v1/notifications/verify-webhook-signature", token=token, json_body=payload)
+    return bool(body) and body.get("verification_status") == "SUCCESS"
+
+
+def _activate_paid_order(conn, order_id):
+    """После подтверждённой оплаты: назначить курьера, списать склад, перевести в
+    'new'. Только для заказа в статусе awaiting_payment (идемпотентность). Всё в
+    переданном conn/транзакции. Возвращает список нехваток склада (для предупреждения)."""
+    order = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
+    if not order or order["status"] != "awaiting_payment":
+        return []
+    if order["fulfillment_type"] == "delivery":
+        dc = conn.execute("SELECT value FROM app_settings WHERE key='default_courier_id'").fetchone()
+        dc = ((dc["value"] if dc else "") or "").strip()
+        if dc:
+            c = conn.execute("SELECT id FROM staff WHERE id=? AND role='courier'", (dc,)).fetchone()
+            if c:
+                conn.execute("UPDATE orders SET assigned_staff_id=? WHERE id=?", (c["id"], order_id))
+    items = conn.execute(
+        "SELECT oi.product_id, oi.variant_id, oi.quantity, p.track_stock "
+        "FROM order_items oi LEFT JOIN products p ON p.id=oi.product_id WHERE oi.order_id=?",
+        (order_id,),
+    ).fetchall()
+    plan_lines = [(i["product_id"], i["variant_id"], i["quantity"]) for i in items if not (i["track_stock"] or 0)]
+    stock_plan, shortage = _plan_order_stock(conn, plan_lines)
+    for fid, amt in stock_plan:
+        conn.execute("UPDATE flower_stock SET quantity = quantity - ? WHERE id=?", (amt, fid))
+        conn.execute("INSERT INTO stock_movements (flower_stock_id, movement_type, quantity, note) "
+                     "VALUES (?, 'sale', ?, ?)", (fid, amt, f"заказ #{order_id}"))
+        _batch_consume(conn, fid, amt)
+    for i in items:
+        if (i["track_stock"] or 0) and i["product_id"]:
+            conn.execute("UPDATE products SET stock_qty = stock_qty - ? WHERE id=?", (i["quantity"], i["product_id"]))
+    conn.execute("UPDATE orders SET status='new' WHERE id=?", (order_id,))
+    return shortage
+
+
+def _finalize_paypal(pp_order_id, amount, currency, raw):
+    """Идемпотентно помечает платёж/заказ оплаченным и активирует заказ.
+    Возвращает 'paid' | 'already' | 'wrong_amount' | 'unknown'."""
+    conn = get_db()
+    pay = conn.execute("SELECT * FROM payments WHERE provider_payment_id=?", (pp_order_id,)).fetchone()
+    if not pay:
+        conn.close()
+        return "unknown"
+    if pay["status"] == "paid":
+        conn.close()
+        return "already"
+    rawj = (json.dumps(raw)[:4000] if raw else None)
+    # Сверка суммы и валюты capture с ожидаемыми — защита от подмены.
+    if amount is None or currency != pay["currency"] or round(amount, 2) != round(pay["amount"] or 0, 2):
+        conn.execute("UPDATE payments SET status='wrong_amount', raw_payload=?, updated_at=? WHERE id=?",
+                     (rawj, _batumi_stamp(), pay["id"]))
+        conn.commit()
+        conn.close()
+        if STAFF_CHAT_ID:
+            enqueue_notification(STAFF_CHAT_ID,
+                                 f"⚠️ Оплата заказа #{pay['order_id']} пришла на неверную сумму/валюту — проверьте вручную.")
+        return "wrong_amount"
+    order_id = pay["order_id"]
+    conn.execute("UPDATE payments SET status='paid', raw_payload=?, updated_at=? WHERE id=?",
+                 (rawj, _batumi_stamp(), pay["id"]))
+    conn.execute("UPDATE orders SET payment_status='paid' WHERE id=?", (order_id,))
+    shortage = _activate_paid_order(conn, order_id)
+    order_row = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
+    item_rows = conn.execute(
+        "SELECT product_name, variant_label, price, quantity FROM order_items WHERE order_id=?",
+        (order_id,),
+    ).fetchall()
+    conn.commit()
+    conn.close()
+    # Уведомления вне транзакции (через outbox).
+    msg = "💳 ОПЛАЧЕНО (PayPal)\n" + format_order_message(dict(order_row), [dict(i) for i in item_rows])
+    if shortage:
+        msg += "\n⚠️ Проверьте остатки: " + ", ".join(sorted(set(shortage)))
+    enqueue_notification(resolve_staff_chat_id(), msg,
+                         reply_markup=_order_action_markup(order_id), fallback_chat_id=STAFF_CHAT_ID)
+    if order_row and order_row["customer_tg_id"]:
+        enqueue_notification(order_row["customer_tg_id"], f"Оплата получена ✅ Заказ #{order_id} принят в работу.")
+    return "paid"
+
+
+def _reconcile_paypal(pp_order_id):
+    """По id PayPal-заказа гарантирует capture и финализацию. Идемпотентно.
+    Единая точка для return-страницы и вебхука."""
+    conn = get_db()
+    pay = conn.execute("SELECT status FROM payments WHERE provider_payment_id=?", (pp_order_id,)).fetchone()
+    conn.close()
+    if not pay:
+        return "unknown"
+    if pay["status"] == "paid":
+        return "already"
+    token = _paypal_token()
+    if not token:
+        return "error"
+    details = _paypal_order_details(pp_order_id, token)
+    if not details:
+        return "error"
+    st = details.get("status")
+    if st == "APPROVED":
+        cst, cap = _paypal_capture(pp_order_id, token)
+        if cap and cap.get("status") == "COMPLETED":
+            details, st = cap, "COMPLETED"
+        else:
+            # 422 = уже захвачен/иное состояние — перечитываем детали.
+            details = _paypal_order_details(pp_order_id, token) or details
+            st = details.get("status")
+    if st == "COMPLETED":
+        amt, cur = _paypal_extract_amount(details)
+        return _finalize_paypal(pp_order_id, amt, cur, details)
+    return st or "unknown"
+
+
+def _order_owned_by_user(order_row):
+    return bool(order_row) and str(order_row["customer_tg_id"]) == str((g.tg_user or {}).get("id", ""))
+
+
+@app.route("/api/orders/<int:order_id>/pay", methods=["POST"])
+@require_auth
+def api_order_pay(order_id):
+    body = request.get_json(force=True) or {}
+    currency = (body.get("currency") or "").upper()
+    if currency not in PAY_CURRENCIES:
+        return jsonify({"error": "bad currency", "detail": "Выберите валюту оплаты"}), 400
+    conn = get_db()
+    order = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
+    conn.close()
+    if not _order_owned_by_user(order):
+        return jsonify({"error": "forbidden"}), 403
+    if (order["payment_status"] or "unpaid") == "paid":
+        return jsonify({"error": "already paid", "detail": "Заказ уже оплачен"}), 409
+    if order["status"] != "awaiting_payment":
+        return jsonify({"error": "not payable", "detail": "Этот заказ нельзя оплатить онлайн"}), 409
+    if not (_paypal_available() and _paypal_configured()):
+        return jsonify({"error": "payment unavailable", "detail": "Онлайн-оплата недоступна"}), 400
+    amount = _pay_amount(order["total"], currency)
+    if amount is None or amount <= 0:
+        return jsonify({"error": "payment unavailable", "detail": "Эта валюта недоступна"}), 400
+    pp_order_id, approval = _paypal_create_order(amount, currency, order_id)
+    if not pp_order_id or not approval:
+        return jsonify({"error": "paypal error", "detail": "PayPal недоступен, попробуйте позже"}), 502
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO payments (order_id, provider, provider_payment_id, amount, currency, amount_gel, rate, status) "
+        "VALUES (?, 'paypal', ?, ?, ?, ?, ?, 'created')",
+        (order_id, pp_order_id, amount, currency, order["total"], _pay_rate(currency)),
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({"approval_url": approval, "pay_amount": amount, "pay_currency": currency})
+
+
+@app.route("/api/orders/<int:order_id>/payment-status")
+@require_auth
+def api_order_payment_status(order_id):
+    conn = get_db()
+    order = conn.execute("SELECT customer_tg_id, payment_status, status FROM orders WHERE id=?", (order_id,)).fetchone()
+    conn.close()
+    if not _order_owned_by_user(order):
+        return jsonify({"error": "forbidden"}), 403
+    return jsonify({"payment_status": order["payment_status"] or "unpaid", "order_status": order["status"]})
+
+
+def _pay_result_page(title, message):
+    return (
+        "<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        f"<title>{title}</title><style>body{{font-family:-apple-system,BlinkMacSystemFont,"
+        "'Segoe UI',Roboto,sans-serif;background:#f5f5f7;color:#1a1a1a;display:flex;"
+        "min-height:100vh;margin:0;align-items:center;justify-content:center;padding:24px}"
+        ".card{background:#fff;border-radius:16px;padding:28px;max-width:340px;text-align:center;"
+        "box-shadow:0 2px 10px rgba(0,0,0,.08)}h1{font-size:20px;margin:0 0 10px}"
+        "p{color:#555;line-height:1.5;margin:0}.e{font-size:40px;margin-bottom:8px}</style></head>"
+        f"<body><div class=\"card\"><div class=\"e\">🌸</div><h1>{title}</h1><p>{message}</p></div></body></html>"
+    )
+
+
+@app.route("/pay/paypal/return")
+def paypal_return():
+    pp_order_id = request.args.get("token", "")
+    if pp_order_id:
+        try:
+            _reconcile_paypal(pp_order_id)
+        except Exception as e:
+            app.logger.error(f"[paypal] return reconcile: {e}")
+    return _pay_result_page("Оплата обрабатывается",
+                            "Спасибо! Можно вернуться в Telegram — статус заказа обновится автоматически.")
+
+
+@app.route("/pay/paypal/cancel")
+def paypal_cancel():
+    return _pay_result_page("Оплата отменена",
+                            "Вы отменили оплату. Вернитесь в Telegram и попробуйте снова.")
+
+
+@app.route("/api/pay/paypal/webhook", methods=["POST"])
+def paypal_webhook():
+    raw = request.get_data()
+    try:
+        event = json.loads(raw)
+    except ValueError:
+        return jsonify({"error": "bad payload"}), 400
+    if not _paypal_verify_webhook(request.headers, event):
+        app.logger.warning("[paypal] webhook signature verify failed")
+        return jsonify({"error": "unverified"}), 400
+    etype = event.get("event_type", "")
+    resource = event.get("resource", {}) or {}
+    pp_order_id = None
+    if etype == "CHECKOUT.ORDER.APPROVED":
+        pp_order_id = resource.get("id")
+    elif etype == "PAYMENT.CAPTURE.COMPLETED":
+        pp_order_id = (((resource.get("supplementary_data") or {}).get("related_ids") or {}).get("order_id"))
+    if pp_order_id:
+        try:
+            _reconcile_paypal(pp_order_id)
+        except Exception as e:
+            app.logger.error(f"[paypal] webhook reconcile: {e}")
+    return jsonify({"ok": True})
 
 
 @app.route("/api/orders/mine")
@@ -2094,6 +2548,7 @@ EDITABLE_SETTINGS = [
     "slot_capacity", "default_courier_id",
     "shop_phone", "shop_instagram", "express_delivery_text", "delivery_payment_info",
     "disclaimer_note",
+    "paypal_enabled", "pay_rate_eur", "pay_rate_usd",
 ]
 
 
@@ -2165,6 +2620,9 @@ def api_admin_orders():
     if status:
         query += " AND status = ?"
         params.append(status)
+    else:
+        # Неоплаченные онлайн-заказы (awaiting_payment) скрыты, пока не оплатят.
+        query += " AND status != 'awaiting_payment'"
     query += " ORDER BY created_at DESC"
     rows = conn.execute(query, params).fetchall()
     staff_names = {s["id"]: s["name"] for s in conn.execute("SELECT id, name FROM staff").fetchall()}

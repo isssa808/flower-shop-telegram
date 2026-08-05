@@ -204,6 +204,26 @@ CREATE TABLE IF NOT EXISTS notifications (
     attempts INTEGER NOT NULL DEFAULT 0,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Онлайн-платежи. Обобщённо под провайдеров (PayPal первый, дальше TBC/Cryptomus).
+-- provider_payment_id UNIQUE = идемпотентность (одно подтверждение оплаты на платёж).
+-- amount/currency — фактически выставленная сумма (USD/EUR), amount_gel/rate — аудит
+-- исходной суммы заказа в лари и применённого курса. status: created | approved |
+-- paid | failed | expired | wrong_amount.
+CREATE TABLE IF NOT EXISTS payments (
+    id INTEGER PRIMARY KEY,
+    order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL,
+    provider_payment_id TEXT UNIQUE,
+    amount REAL,
+    currency TEXT,
+    amount_gel REAL,
+    rate REAL,
+    status TEXT NOT NULL DEFAULT 'created',
+    raw_payload TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 

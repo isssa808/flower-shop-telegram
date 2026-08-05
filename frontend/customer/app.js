@@ -621,6 +621,17 @@ async function loadSlots() {
 function openCheckout() {
   state.fulfillment = "delivery";
   state.zone = "batumi";
+  // Кнопка онлайн-оплаты (PayPal) — только если владелец её включил и задал курс.
+  const ppBtn = el("pay-paypal-btn");
+  if (ppBtn) {
+    const on = !!(state.shop && state.shop.paypal_enabled);
+    ppBtn.hidden = !on;
+    if (!on && state.paymentMethod === "paypal") {
+      state.paymentMethod = "cash";
+      document.querySelectorAll("#payment-toggle .segmented-btn").forEach((b) =>
+        b.classList.toggle("active", b.dataset.value === "cash"));
+    }
+  }
   const dateEl = el("f-date");
   if (dateEl) {
     dateEl.min = batumiToday();
@@ -741,9 +752,13 @@ el("checkout-form").addEventListener("submit", async (e) => {
     state.cart = [];
     updateCartBar();
     navReset();
-    renderConfirmation(order);
+    if (order.needs_payment) {
+      renderPaymentStart(order);
+    } else {
+      renderConfirmation(order);
+      haptic("success");
+    }
     navPush("confirm");
-    haptic("success");
   } catch (err) {
     const detail = err.data?.detail;
     showToast(detail || (err.data?.error === "unauthorized" ? t("order_auth_err") : t("order_fail")));
@@ -768,11 +783,123 @@ function bloomProgressHtml(status) {
 }
 
 function renderConfirmation(order) {
+  stopPaymentPoll();
   el("confirm-content").innerHTML = `
     <div class="confirm-icon">💐</div>
     <div class="confirm-title">${t("order_accepted", { n: order.id })}</div>
     <div class="confirm-sub">${t("order_accepted_sub", { sum: money(order.total) })}</div>
     ${bloomProgressHtml(order.status)}
+    <button class="btn btn-secondary btn-block" style="margin-top:22px;" id="confirm-done">${t("done")}</button>
+  `;
+  el("confirm-done").addEventListener("click", navBack);
+}
+
+// ---------------------------------------------------------------------
+// Онлайн-оплата (PayPal): выбор валюты → переход на оплату → поллинг статуса
+// ---------------------------------------------------------------------
+const PAY_CCY = [
+  { code: "EUR", sym: "€", rateKey: "pay_rate_eur" },
+  { code: "USD", sym: "$", rateKey: "pay_rate_usd" },
+];
+// Сумма в валюте = лари / курс, округление вверх до цента (как на сервере).
+function payAmount(totalGel, rate) {
+  const r = Number(rate || 0);
+  if (r <= 0) return null;
+  return Math.ceil((Number(totalGel) / r) * 100) / 100;
+}
+
+let paymentPollTimer = null;
+let payVisHandler = null;
+function stopPaymentPoll() {
+  if (paymentPollTimer) { clearInterval(paymentPollTimer); paymentPollTimer = null; }
+  if (payVisHandler) { document.removeEventListener("visibilitychange", payVisHandler); payVisHandler = null; }
+}
+
+// Экран после создания онлайн-заказа: выбор валюты с суммой «≈ €X / ≈ $Y».
+function renderPaymentStart(order) {
+  stopPaymentPoll();
+  const opts = PAY_CCY.map((c) => {
+    const amt = payAmount(order.total, state.shop?.[c.rateKey]);
+    if (amt == null) return "";
+    return `<button class="btn btn-primary btn-block pay-ccy-btn" data-ccy="${c.code}" style="margin-bottom:10px;">${t("pay_now", { amount: c.sym + amt.toFixed(2) })}</button>`;
+  }).filter(Boolean).join("");
+  el("confirm-content").innerHTML = `
+    <div class="confirm-icon">💳</div>
+    <div class="confirm-title">${t("awaiting_pay_title")}</div>
+    <div class="confirm-sub">${t("awaiting_pay_sub", { n: order.id })}</div>
+    <div style="margin:16px 0 8px; font-weight:600;">${t("pay_choose_currency")}</div>
+    ${opts}
+    <div class="pd-note" style="margin-top:10px;">${t("pay_online_hint")}</div>
+  `;
+  el("confirm-content").querySelectorAll(".pay-ccy-btn").forEach((b) =>
+    b.addEventListener("click", () => startPayment(order, b.dataset.ccy))
+  );
+}
+
+async function startPayment(order, currency) {
+  const btns = el("confirm-content").querySelectorAll(".pay-ccy-btn");
+  btns.forEach((b) => (b.disabled = true));
+  try {
+    const res = await apiFetch(`/api/orders/${order.id}/pay`, { method: "POST", body: { currency }, tg });
+    if (res && res.approval_url) {
+      if (tg.openLink) tg.openLink(res.approval_url); else window.open(res.approval_url, "_blank");
+      renderPaymentWaiting(order);
+      startPaymentPoll(order);
+    } else {
+      showToast(t("pay_start_err"));
+      btns.forEach((b) => (b.disabled = false));
+    }
+  } catch (err) {
+    showToast(err.data?.detail || t("pay_start_err"));
+    btns.forEach((b) => (b.disabled = false));
+  }
+}
+
+// Ожидание оплаты: показываем «проверяем», поллим статус, есть ручная перепроверка.
+function renderPaymentWaiting(order) {
+  el("confirm-content").innerHTML = `
+    <div class="confirm-icon">⏳</div>
+    <div class="confirm-title">${t("pay_checking")}</div>
+    <div class="confirm-sub">${t("awaiting_pay_sub", { n: order.id })}</div>
+    <div class="pd-note" style="margin-top:10px;">${t("pay_online_hint")}</div>
+    <button class="btn btn-primary btn-block pay-ccy-btn" id="pay-recheck" style="margin-top:16px;">${t("pay_i_paid")}</button>
+  `;
+  el("pay-recheck").addEventListener("click", () => checkPaymentOnce(order, true));
+}
+
+function startPaymentPoll(order) {
+  stopPaymentPoll();
+  const until = Date.now() + 10 * 60 * 1000; // поллим до 10 минут
+  paymentPollTimer = setInterval(() => {
+    if (Date.now() > until) { stopPaymentPoll(); return; }
+    if (curSheet() === "confirm") checkPaymentOnce(order, false);
+  }, 4000);
+  // Клиент вернулся из браузера — сразу проверить.
+  payVisHandler = () => {
+    if (document.visibilityState === "visible" && curSheet() === "confirm") checkPaymentOnce(order, false);
+  };
+  document.addEventListener("visibilitychange", payVisHandler);
+}
+
+async function checkPaymentOnce(order, manual) {
+  try {
+    const s = await apiFetch(`/api/orders/${order.id}/payment-status`, { tg });
+    if (s && s.payment_status === "paid") {
+      stopPaymentPoll();
+      renderPaymentSuccess(order);
+      haptic("success");
+    } else if (manual) {
+      showToast(t("pay_checking"));
+    }
+  } catch (_) { if (manual) showToast(t("pay_start_err")); }
+}
+
+function renderPaymentSuccess(order) {
+  el("confirm-content").innerHTML = `
+    <div class="confirm-icon">💐</div>
+    <div class="confirm-title">${t("payment_success")}</div>
+    <div class="confirm-sub">${t("payment_success_sub", { n: order.id })}</div>
+    ${bloomProgressHtml("new")}
     <button class="btn btn-secondary btn-block" style="margin-top:22px;" id="confirm-done">${t("done")}</button>
   `;
   el("confirm-done").addEventListener("click", navBack);

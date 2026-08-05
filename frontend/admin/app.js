@@ -1147,6 +1147,17 @@ function renderSettings() {
         <div class="field"><label>Телефон</label><input name="shop_phone" value="${esc(s.shop_phone)}" placeholder="+995 5xx xx xx xx"/></div>
         <div class="field"><label>Instagram (ник без @)</label><input name="shop_instagram" value="${esc(s.shop_instagram)}" placeholder="flowers_batum_flower"/></div>
 
+        <h3 class="settings-group">Онлайн-оплата (PayPal)</h3>
+        <label class="checkbox-row" style="margin:2px 0 8px;">
+          <input type="checkbox" name="paypal_enabled" ${String(s.paypal_enabled) === "1" ? "checked" : ""}/>
+          <span>Включить оплату PayPal (картой) на витрине</span>
+        </label>
+        <div class="field-row">
+          <div class="field"><label>1 EUR = … лари</label><input name="pay_rate_eur" type="number" step="0.01" min="0" value="${esc(s.pay_rate_eur)}" placeholder="напр. 2.8"/></div>
+          <div class="field"><label>1 USD = … лари</label><input name="pay_rate_usd" type="number" step="0.01" min="0" value="${esc(s.pay_rate_usd)}" placeholder="напр. 2.55"/></div>
+        </div>
+        <div class="cr-meta" style="margin:-4px 0 10px;">Курс с зашитой комиссией: ставьте чуть НИЖЕ реального (реальный ~2.7 → 2.55) — разница покроет сбор PayPal. Клиент выбирает валюту и видит сумму до оплаты. Пустой курс = валюта недоступна. Секретные ключи PayPal задаёт разработчик в переменных окружения сервера.</div>
+
         <h3 class="settings-group">Тексты витрины</h3>
         <div class="field"><label>Экспресс-доставка (срок)</label><input name="express_delivery_text" value="${esc(s.express_delivery_text)}" placeholder="в течение часа"/></div>
         <div class="field"><label>Сноска про живые цветы</label><textarea name="disclaimer_note" rows="3">${esc(s.disclaimer_note)}</textarea></div>
@@ -1198,6 +1209,9 @@ function renderSettings() {
           default_courier_id: fd.get("default_courier_id"),
           shop_phone: fd.get("shop_phone"),
           shop_instagram: fd.get("shop_instagram"),
+          paypal_enabled: fd.get("paypal_enabled") ? "1" : "",
+          pay_rate_eur: fd.get("pay_rate_eur"),
+          pay_rate_usd: fd.get("pay_rate_usd"),
           express_delivery_text: fd.get("express_delivery_text"),
           disclaimer_note: fd.get("disclaimer_note"),
           delivery_payment_info: fd.get("delivery_payment_info"),
