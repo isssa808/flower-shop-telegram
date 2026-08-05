@@ -430,13 +430,20 @@ async function openProductEdit(productId) {
   if (!(state.stock && state.stock.length)) { try { await loadStock(); } catch {} }
   const p = productId ? state.products.find((x) => x.id === productId) : null;
   const variants = p && p.variants.length ? p.variants : [{ label: "", price: "", recipe: [] }];
+  // Отмеченные категории: у товара — из его списка (fallback на старую одиночную);
+  // у нового — первая категория по умолчанию (чтобы не забыть выбрать).
+  const catChecked = p
+    ? (p.category_ids && p.category_ids.length ? p.category_ids : (p.category_id != null ? [p.category_id] : []))
+    : (state.categories[0] ? [state.categories[0].id] : []);
 
   el("product-edit-content").innerHTML = `
     <h2>${p ? "Редактировать товар" : "Новый товар"}</h2>
     <form id="product-form">
       <div class="field"><label>Название</label><input name="name" required value="${p?.name || ""}"/></div>
-      <div class="field"><label>Категория</label>
-        <select name="category_id">${state.categories.map((c) => `<option value="${c.id}" ${p?.category_id === c.id ? "selected" : ""}>${c.name}</option>`).join("")}</select>
+      <div class="field"><label>Категории (можно несколько)</label>
+        <div style="display:flex; flex-wrap:wrap; gap:8px 14px;">
+          ${state.categories.map((c) => `<label class="chk"><input type="checkbox" name="category_ids" value="${c.id}" ${catChecked.includes(c.id) ? "checked" : ""}/><span>${c.name}</span></label>`).join("")}
+        </div>
       </div>
       <div class="field"><label>Описание</label><textarea name="description" rows="2">${p?.description || ""}</textarea></div>
       <div class="field"><label>Состав (текст для клиента)</label><input name="composition" value="${p?.composition || ""}"/></div>
@@ -532,6 +539,8 @@ async function openProductEdit(productId) {
   el("product-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
+    const catIds = fd.getAll("category_ids").map(Number).filter((n) => Number.isFinite(n));
+    if (!catIds.length) { showToast("Выберите хотя бы одну категорию"); return; }
     const variantRows = [...variantEditor.querySelectorAll(".variant-editor-row")]
       .map((row) => ({
         label: row.querySelector(".v-label").value,
@@ -549,7 +558,7 @@ async function openProductEdit(productId) {
 
     const body = {
       location_id: LOCATION_ID,
-      category_id: Number(fd.get("category_id")),
+      category_ids: catIds,
       name: fd.get("name"),
       description: fd.get("description"),
       composition: fd.get("composition"),
@@ -919,7 +928,7 @@ function renderCategoriesAdmin() {
   }
   wrap.innerHTML = state.categories
     .map((c) => {
-      const count = state.products.filter((p) => p.category_id === c.id).length;
+      const count = state.products.filter((p) => (p.category_ids || []).includes(c.id)).length;
       return `
     <div class="card catalog-row">
       <div class="cr-info">
@@ -972,12 +981,13 @@ function openCategoryEdit(categoryId) {
 
 function deleteCategory(id) {
   const c = state.categories.find((x) => x.id === id);
-  const count = state.products.filter((p) => p.category_id === id).length;
-  if (count) {
-    showToast(`В категории ${count} товар(ов) — сначала перенесите их`);
-    return;
-  }
-  tg.showConfirm(`Удалить категорию «${c?.name}»?`, async (ok) => {
+  // Товар может быть в нескольких категориях — удаление просто снимет эту категорию.
+  // Сервер откажет, только если товар останется совсем без категорий.
+  const count = state.products.filter((p) => (p.category_ids || []).includes(c?.id)).length;
+  const msg = count
+    ? `Убрать категорию «${c?.name}» с ${count} товар(ов) и удалить её?`
+    : `Удалить категорию «${c?.name}»?`;
+  tg.showConfirm(msg, async (ok) => {
     if (!ok) return;
     try {
       await apiFetch(`/api/admin/categories/${id}`, { method: "DELETE", tg });

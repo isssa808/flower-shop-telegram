@@ -211,6 +211,13 @@ def bootstrap():
     if os.environ.get("SEED_DEMO", "1") != "0" and \
        not conn.execute("SELECT 1 FROM products LIMIT 1").fetchone():
         seed_demo_catalog(conn)
+    # Бэкфилл связки товар↔категории: каждому товару — строка из его текущей
+    # (единственной) category_id. Идемпотентно (INSERT OR IGNORE + UNIQUE), новые
+    # товары со связкой это не трогает.
+    conn.execute(
+        "INSERT OR IGNORE INTO product_categories (product_id, category_id) "
+        "SELECT id, category_id FROM products WHERE category_id IS NOT NULL"
+    )
     conn.commit()
     conn.close()
 
@@ -1034,6 +1041,56 @@ def _save_variant_recipe(conn, product_id, variant_id, recipe):
             "VALUES (?, ?, ?, ?, ?)", (product_id, variant_id, fid, ftype, qn))
 
 
+def _save_product_categories(conn, product_id, category_ids):
+    """Перезаписывает связку товар↔категории. category_ids — список id (любой
+    порядок). Оставляем только существующие категории, без дублей, сохраняя
+    порядок. products.category_id держим = первой (валидность NOT NULL-колонки).
+    Возвращает нормализованный список id (или [] если валидных нет)."""
+    valid = {r["id"] for r in conn.execute("SELECT id FROM categories").fetchall()}
+    seen, clean = set(), []
+    for c in (category_ids or []):
+        try:
+            cid = int(c)
+        except (TypeError, ValueError):
+            continue
+        if cid in valid and cid not in seen:
+            seen.add(cid)
+            clean.append(cid)
+    if not clean:
+        return []
+    conn.execute("DELETE FROM product_categories WHERE product_id=?", (product_id,))
+    for cid in clean:
+        conn.execute(
+            "INSERT OR IGNORE INTO product_categories (product_id, category_id) VALUES (?, ?)",
+            (product_id, cid),
+        )
+    conn.execute("UPDATE products SET category_id=? WHERE id=?", (clean[0], product_id))
+    return clean
+
+
+def _requested_category_ids(body):
+    """Категории из тела запроса: новый category_ids (массив) или старый одиночный
+    category_id (совместимость). None = поле не пришло (категории не менять)."""
+    ids = body.get("category_ids")
+    if ids is None:
+        if body.get("category_id") is not None:
+            return [body["category_id"]]
+        return None
+    return ids
+
+
+def _product_category_ids(conn, product_id, fallback_category_id=None):
+    """Список id категорий товара из связки; fallback на одиночную category_id."""
+    rows = conn.execute(
+        "SELECT category_id FROM product_categories WHERE product_id=? ORDER BY id",
+        (product_id,),
+    ).fetchall()
+    ids = [r["category_id"] for r in rows]
+    if not ids and fallback_category_id is not None:
+        ids = [fallback_category_id]
+    return ids
+
+
 def _product_with_variants(conn, product_row, levels=None):
     p = dict(product_row)
     if levels is None:
@@ -1078,6 +1135,7 @@ def _product_with_variants(conn, product_row, levels=None):
     else:
         p["available"] = (_variant_available(prod_lines, per, grp) if prod_lines else True)
     p["occasion_tags"] = [t for t in (p.get("occasion_tags") or "").split(",") if t]
+    p["category_ids"] = _product_category_ids(conn, p["id"], p.get("category_id"))
     # Популярность: лайки и число заказов (кроме отменённых). Показываем на карточке.
     p["likes"] = conn.execute(
         "SELECT COUNT(*) c FROM favorites WHERE product_id = ?", (p["id"],)
@@ -1103,7 +1161,8 @@ def api_products():
     if addon == "1":
         query += " AND is_addon = 1"
     if category:
-        query += " AND category_id = (SELECT id FROM categories WHERE slug = ?)"
+        query += (" AND id IN (SELECT pc.product_id FROM product_categories pc "
+                  "JOIN categories c ON c.id = pc.category_id WHERE c.slug = ?)")
         params.append(category)
     if search:
         query += " AND (name LIKE ? OR description LIKE ?)"
@@ -1482,12 +1541,25 @@ def api_admin_products():
     conn = get_db()
     if request.method == "POST":
         body = request.get_json(force=True)
+        # Категории (одна или несколько). Валидируем против существующих; ≥1 обязательна.
+        valid_ids = {r["id"] for r in conn.execute("SELECT id FROM categories").fetchall()}
+        cat_ids = []
+        for c in (_requested_category_ids(body) or []):
+            try:
+                c = int(c)
+            except (TypeError, ValueError):
+                continue
+            if c in valid_ids and c not in cat_ids:
+                cat_ids.append(c)
+        if not cat_ids:
+            conn.close()
+            return jsonify({"error": "category required", "detail": "Выберите хотя бы одну категорию"}), 400
         cur = conn.execute(
             "INSERT INTO products (location_id, category_id, name, description, composition, "
             "photo_url, status, occasion_tags, is_addon, badge, track_stock, stock_qty) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                body["location_id"], body["category_id"], body["name"],
+                body["location_id"], cat_ids[0], body["name"],
                 body.get("description", ""), body.get("composition", ""),
                 body.get("photo_url", "/static/img/placeholder.svg"),
                 body.get("status", "in_stock"), ",".join(body.get("occasion_tags", [])),
@@ -1496,6 +1568,7 @@ def api_admin_products():
             ),
         )
         product_id = cur.lastrowid
+        _save_product_categories(conn, product_id, cat_ids)
         for v in body.get("variants", []):
             vc = conn.execute(
                 "INSERT INTO product_variants (product_id, label, price) VALUES (?, ?, ?)",
@@ -1543,10 +1616,6 @@ def api_admin_product_edit(product_id):
         "track_stock": 1 if body.get("track_stock") else 0,
         "stock_qty": float(body.get("stock_qty") or 0),
     }
-    # category_id обновляем только если пришёл (как photo_url): раньше его вообще
-    # не было в списке полей — из-за этого смена категории у товара не сохранялась.
-    if body.get("category_id") is not None:
-        fields["category_id"] = body["category_id"]
     if body.get("photo_url"):
         fields["photo_url"] = body["photo_url"]
     set_clause = ", ".join(f"{k}=?" for k in fields)  # ключи — фикс. литералы, не ввод
@@ -1554,6 +1623,14 @@ def api_admin_product_edit(product_id):
         f"UPDATE products SET {set_clause} WHERE id=?",
         (*fields.values(), product_id),
     )
+    # Категории обновляем только если поле пришло. Пустой/невалидный список — ошибка
+    # (товар не оставляем без категории). _save_product_categories чинит и category_id.
+    requested_cats = _requested_category_ids(body)
+    if requested_cats is not None:
+        saved = _save_product_categories(conn, product_id, requested_cats)
+        if not saved:
+            conn.close()
+            return jsonify({"error": "category required", "detail": "Выберите хотя бы одну категорию"}), 400
     if "variants" in body:
         conn.execute("DELETE FROM recipe_lines WHERE product_id = ?", (product_id,))
         conn.execute("DELETE FROM product_variants WHERE product_id = ?", (product_id,))
@@ -1883,16 +1960,30 @@ def api_admin_category_edit(category_id):
         return jsonify({"error": "not found"}), 404
 
     if request.method == "DELETE":
-        cnt = conn.execute(
-            "SELECT COUNT(*) AS c FROM products WHERE category_id=?", (category_id,)
+        # Товар может быть в нескольких категориях: удаление просто снимает эту
+        # категорию с товаров (каскад по связке). Блокируем ТОЛЬКО если товар
+        # останется совсем без категорий (для него эта — единственная).
+        orphans = conn.execute(
+            "SELECT COUNT(*) AS c FROM product_categories pc WHERE pc.category_id=? "
+            "AND NOT EXISTS (SELECT 1 FROM product_categories pc2 "
+            "WHERE pc2.product_id=pc.product_id AND pc2.category_id != ?)",
+            (category_id, category_id),
         ).fetchone()["c"]
-        if cnt:
+        if orphans:
             conn.close()
             return jsonify({
                 "error": "category not empty",
-                "detail": f"В категории {cnt} товар(ов). Перенесите их в другую категорию, потом удалите.",
+                "detail": f"{orphans} товар(ов) останутся без категории. Сначала добавьте им другую категорию.",
             }), 400
-        conn.execute("DELETE FROM categories WHERE id=?", (category_id,))
+        # Починка «первой» категории у товаров, где она указывала на удаляемую
+        # (до DELETE, чтобы FK на products.category_id не помешал).
+        conn.execute(
+            "UPDATE products SET category_id = (SELECT pc.category_id FROM product_categories pc "
+            "WHERE pc.product_id = products.id AND pc.category_id != ? ORDER BY pc.id LIMIT 1) "
+            "WHERE category_id = ?",
+            (category_id, category_id),
+        )
+        conn.execute("DELETE FROM categories WHERE id=?", (category_id,))  # связка — каскадом
         conn.commit()
         conn.close()
         return jsonify({"deleted": category_id})

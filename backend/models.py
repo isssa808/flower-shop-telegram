@@ -92,6 +92,16 @@ CREATE TABLE IF NOT EXISTS product_recipe (
     quantity_needed REAL NOT NULL
 );
 
+-- Товар ↔ категории (многие-ко-многим): один букет может висеть сразу в
+-- нескольких категориях. products.category_id остаётся как «первая»/техническая
+-- (валидность NOT NULL), источник правды о принадлежности — эта связка.
+CREATE TABLE IF NOT EXISTS product_categories (
+    id INTEGER PRIMARY KEY,
+    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+    UNIQUE(product_id, category_id)
+);
+
 -- Рецепт по размерам с заменами. Строка = ЛИБО конкретный цветок (flower_stock_id),
 -- ЛИБО группа/тип (flower_type, любой цвет внутри) + количество в штуках.
 CREATE TABLE IF NOT EXISTS recipe_lines (
