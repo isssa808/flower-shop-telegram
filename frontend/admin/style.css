@@ -97,6 +97,21 @@
 .catalog-row .cr-actions { display: flex; gap: 6px; }
 .cr-nostock { color: var(--faint, #a99); font-style: italic; }
 
+/* Ручка перетаскивания товара (общий порядок). touch-action:none — чтобы жест
+   не перехватывался прокруткой списка; тянуть можно только за неё. */
+.cr-drag {
+  flex: 0 0 auto; width: 30px; height: 44px; margin: -4px -4px -4px -2px;
+  display: flex; align-items: center; justify-content: center;
+  background: none; border: none; padding: 0;
+  font-size: 18px; line-height: 1; color: var(--ink-muted);
+  cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none;
+}
+.cr-drag:active { cursor: grabbing; }
+.catalog-row.dragging {
+  opacity: 0.9; box-shadow: 0 8px 22px rgba(0,0,0,0.22);
+  transform: scale(1.02); position: relative; z-index: 5;
+}
+
 /* --- склад --- */
 .stock-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
 .stock-toolbar #stock-search { flex: 1; padding: 10px 12px; border: 1.5px solid var(--border); border-radius: 10px; background: var(--surface-2); font: inherit; color: var(--ink); }

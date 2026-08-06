@@ -331,7 +331,8 @@ function renderCatalog() {
   wrap.innerHTML = state.products
     .map(
       (p) => `
-    <div class="card catalog-row">
+    <div class="card catalog-row" data-row="${p.id}">
+      <button class="cr-drag" data-drag="${p.id}" aria-label="Переместить" title="Перетащить">⠿</button>
       <img src="${p.photo_url}" alt=""/>
       <div class="cr-info">
         <div class="cr-name">${p.name}${badgeRu(p.badge) ? ` <span class="badge badge-rose">${badgeRu(p.badge)}</span>` : ""}</div>
@@ -349,6 +350,61 @@ function renderCatalog() {
   wrap.querySelectorAll("[data-preview]").forEach((b) => b.addEventListener("click", () => previewProduct(state.products.find((x) => x.id === Number(b.dataset.preview)))));
   wrap.querySelectorAll("[data-edit]").forEach((b) => b.addEventListener("click", () => openProductEdit(Number(b.dataset.edit))));
   wrap.querySelectorAll("[data-delete]").forEach((b) => b.addEventListener("click", () => deleteProduct(Number(b.dataset.delete))));
+  wrap.querySelectorAll(".cr-drag").forEach((h) => h.addEventListener("pointerdown", (e) => startCatalogDrag(e, wrap)));
+}
+
+// Перетаскивание товаров за ручку ⠿. Общий порядок сохраняется на сервере и
+// отражается на витрине. Реализация на Pointer Events без библиотек: место
+// вставки считаем по геометрии соседних карточек (надёжно на тач, без хаков
+// с pointer-events/elementFromPoint).
+function startCatalogDrag(e, wrap) {
+  e.preventDefault();
+  const dragEl = e.target.closest(".catalog-row");
+  if (!dragEl) return;
+  dragEl.classList.add("dragging");
+
+  const rowAfter = (y) => {
+    const rows = [...wrap.querySelectorAll(".catalog-row:not(.dragging)")];
+    let closest = { offset: -Infinity, el: null };
+    for (const row of rows) {
+      const box = row.getBoundingClientRect();
+      const offset = y - (box.top + box.height / 2);
+      if (offset < 0 && offset > closest.offset) closest = { offset, el: row };
+    }
+    return closest.el;
+  };
+
+  const onMove = (ev) => {
+    ev.preventDefault();
+    const after = rowAfter(ev.clientY);
+    if (after == null) wrap.appendChild(dragEl);
+    else if (after !== dragEl.nextSibling) wrap.insertBefore(dragEl, after);
+    // Лёгкий автоскролл у краёв экрана.
+    const m = 90;
+    if (ev.clientY < m) window.scrollBy(0, -14);
+    else if (ev.clientY > window.innerHeight - m) window.scrollBy(0, 14);
+  };
+
+  const onUp = async () => {
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    window.removeEventListener("pointercancel", onUp);
+    dragEl.classList.remove("dragging");
+    const order = [...wrap.querySelectorAll(".catalog-row")].map((r) => Number(r.dataset.row));
+    // Пересобираем state.products в новом порядке (чтобы будущие ре-рендеры совпадали).
+    const byId = new Map(state.products.map((p) => [p.id, p]));
+    state.products = order.map((id) => byId.get(id)).filter(Boolean);
+    try {
+      await apiFetch("/api/admin/products/reorder", { method: "POST", body: { order }, tg });
+    } catch (err) {
+      showToast("Не удалось сохранить порядок");
+      renderCatalog();
+    }
+  };
+
+  window.addEventListener("pointermove", onMove, { passive: false });
+  window.addEventListener("pointerup", onUp);
+  window.addEventListener("pointercancel", onUp);
 }
 
 el("add-product-btn").addEventListener("click", () => openProductEdit(null));

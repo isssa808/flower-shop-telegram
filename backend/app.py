@@ -109,6 +109,13 @@ def bootstrap():
     # Штучные товары (шары/вазы/сладости): свой остаток вместо рецепта из цветов.
     _add_column_if_missing(conn, "products", "track_stock", "INTEGER NOT NULL DEFAULT 0")
     _add_column_if_missing(conn, "products", "stock_qty", "REAL NOT NULL DEFAULT 0")
+    # Ручной порядок товаров (владелец расставляет перетаскиванием). Общий на все
+    # товары, влияет и на витрину («по умолчанию»). Бэкфилл: если порядок ещё ни у
+    # кого не проставлен — задать sort_order = id, чтобы сохранить прежний вид.
+    _add_column_if_missing(conn, "products", "sort_order", "INTEGER NOT NULL DEFAULT 0")
+    if not conn.execute("SELECT 1 FROM products WHERE sort_order != 0 LIMIT 1").fetchone():
+        conn.execute("UPDATE products SET sort_order = id")
+        conn.commit()
     # Разовый перенос старых product_recipe → recipe_lines (на товар целиком), если пусто.
     if not conn.execute("SELECT 1 FROM recipe_lines LIMIT 1").fetchone():
         for r in conn.execute("SELECT product_id, flower_stock_id, quantity_needed FROM product_recipe").fetchall():
@@ -1221,7 +1228,7 @@ def api_products():
     if occasion:
         query += " AND occasion_tags LIKE ?"
         params.append(f"%{occasion}%")
-    query += " ORDER BY id"
+    query += " ORDER BY sort_order, id"
 
     conn = get_db()
     rows = conn.execute(query, params).fetchall()
@@ -2008,10 +2015,12 @@ def api_admin_products():
         if not cat_ids:
             conn.close()
             return jsonify({"error": "category required", "detail": "Выберите хотя бы одну категорию"}), 400
+        # Новый товар встаёт в конец общего порядка.
+        next_sort = conn.execute("SELECT COALESCE(MAX(sort_order), 0) + 1 AS n FROM products").fetchone()["n"]
         cur = conn.execute(
             "INSERT INTO products (location_id, category_id, name, description, composition, "
-            "photo_url, status, occasion_tags, is_addon, badge, track_stock, stock_qty) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "photo_url, status, occasion_tags, is_addon, badge, track_stock, stock_qty, sort_order) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 body["location_id"], cat_ids[0], body["name"],
                 body.get("description", ""), body.get("composition", ""),
@@ -2019,6 +2028,7 @@ def api_admin_products():
                 body.get("status", "in_stock"), ",".join(body.get("occasion_tags", [])),
                 1 if body.get("is_addon") else 0, _clean_badge(body.get("badge")),
                 1 if body.get("track_stock") else 0, float(body.get("stock_qty") or 0),
+                next_sort,
             ),
         )
         product_id = cur.lastrowid
@@ -2037,7 +2047,7 @@ def api_admin_products():
 
     location_id = request.args.get("location_id", 1)
     rows = conn.execute(
-        "SELECT * FROM products WHERE location_id = ? ORDER BY id DESC", (location_id,)
+        "SELECT * FROM products WHERE location_id = ? ORDER BY sort_order, id", (location_id,)
     ).fetchall()
     levels = _stock_levels(conn)
     result = [_product_with_variants(conn, r, levels) for r in rows]
@@ -2099,6 +2109,31 @@ def api_admin_product_edit(product_id):
     result = _product_with_variants(conn, row)
     conn.close()
     return jsonify(result)
+
+
+@app.route("/api/admin/products/reorder", methods=["POST"])
+@require_owner
+def api_admin_products_reorder():
+    # Владелец расставил товары перетаскиванием — сохраняем общий порядок.
+    # Тело: {"order": [id, id, ...]} в нужной последовательности. Проставляем
+    # sort_order = позиция (0,1,2,…) только тем товарам, что реально существуют.
+    body = request.get_json(force=True) or {}
+    order = body.get("order") or []
+    conn = get_db()
+    valid = {r["id"] for r in conn.execute("SELECT id FROM products").fetchall()}
+    pos = 0
+    for pid in order:
+        try:
+            pid = int(pid)
+        except (TypeError, ValueError):
+            continue
+        if pid not in valid:
+            continue
+        conn.execute("UPDATE products SET sort_order = ? WHERE id = ?", (pos, pid))
+        pos += 1
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True, "count": pos})
 
 
 @app.route("/api/admin/products/<int:product_id>/photo", methods=["POST"])
