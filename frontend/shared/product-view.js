@@ -51,13 +51,14 @@ export function buildProductSheetHtml(p, opts = {}) {
       (v) => `
       <button class="variant-pill ${v.id === selectedVariantId ? "active" : ""}${v.available === false ? " unavail" : ""}" data-variant="${v.id}"${(preview || v.available === false) ? " disabled" : ""}>
         ${v.label}
-        <span class="v-price">${v.price > 0 ? money(v.price) : t("on_request")}</span>
+        <span class="v-price">${(!p.price_on_request && v.price > 0) ? money(v.price) : t("on_request")}</span>
       </button>`
     )
     .join("");
 
   const minP = priceOf(p);
-  const leadPrice = minP ? `${t("from_price")} ${money(minP)}` : t("on_request");
+  const onRequest = !!p.price_on_request || !minP;
+  const leadPrice = onRequest ? t("price_request") : `${t("from_price")} ${money(minP)}`;
 
   const desc = p.description || "";
   const isLong = desc.length > 120;
@@ -84,9 +85,13 @@ export function buildProductSheetHtml(p, opts = {}) {
 
   const selVar = (p.variants || []).find((v) => v.id === selectedVariantId);
   const selUnavail = selVar ? (selVar.available === false) : false;
+  // «Под заказ» или «стоимость по запросу» → без прямой покупки, кнопка к менеджеру.
+  const contactOnly = p.status === "made_to_order" || !!p.price_on_request;
   const buyBlock = preview
     ? ""
-    : (p.available === false
+    : (contactOnly
+      ? `<button class="btn btn-primary btn-block" id="ask-manager-btn">${t("ask_manager")}</button>`
+      : p.available === false
       ? `<div class="pd-oos">${t("out_of_stock")}</div>`
       : `
     <div class="pd-label">${t("quantity")}</div>

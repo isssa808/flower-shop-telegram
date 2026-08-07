@@ -193,9 +193,10 @@ function findProduct(id) {
 
 function productCardHtml(p) {
   const minPrice = priceOf(p);
-  const priceLabel = minPrice
-    ? `<span class="pc-price"><small>${t("from_price")}</small> ${money(minPrice)}</span>`
-    : `<span class="pc-price">${t("on_request")}</span>`;
+  const contactOnly = p.status === "made_to_order" || !!p.price_on_request;
+  const priceLabel = (p.price_on_request || !minPrice)
+    ? `<span class="pc-price pc-price-req">${t("price_request")}</span>`
+    : `<span class="pc-price"><small>${t("from_price")}</small> ${money(minPrice)}</span>`;
   const fav = state.favorites.has(p.id) ? " on" : "";
   const blabel = badgeLabel(t, p.badge);
   const unavailable = p.available === false;
@@ -207,7 +208,9 @@ function productCardHtml(p) {
   const likes = p.likes > 0
     ? `<div class="pc-likes"><svg viewBox="0 0 24 24" stroke="none"><path d="M12 21C12 21 4 14.5 4 8.8C4 5.9 6.2 4 8.6 4C10.2 4 11.4 4.9 12 6C12.6 4.9 13.8 4 15.4 4C17.8 4 20 5.9 20 8.8C20 14.5 12 21 12 21Z"/></svg>${p.likes}${p.order_count > 0 ? `<span class="pc-orders">· ${t("ordered_times", { n: p.order_count })}</span>` : ""}</div>`
     : (p.order_count > 0 ? `<div class="pc-likes"><span class="pc-orders">${t("ordered_times", { n: p.order_count })}</span></div>` : "");
-  const plus = unavailable
+  const plus = contactOnly
+    ? ""
+    : unavailable
     ? `<button class="pc-plus" disabled aria-label="add">+</button>`
     : `<button class="pc-plus" data-add="${p.id}" type="button" aria-label="add">+</button>`;
   return `
@@ -414,6 +417,7 @@ function renderProductSheet() {
     el("qty-value").textContent = state.selectedQty;
   });
   el("add-to-cart-btn")?.addEventListener("click", addSelectedToCart);
+  el("ask-manager-btn")?.addEventListener("click", openManagerChat);
 
   const dtoggle = el("desc-toggle");
   if (dtoggle) dtoggle.addEventListener("click", () => { state.descExpanded = !state.descExpanded; renderProductSheet(); });
@@ -468,8 +472,7 @@ function updateCartBar() {
   const bar = el("cart-bar");
   const count = cartCount();
   setBadge(el("cart-nav-badge"), count);
-  setBadge(el("header-cart-badge"), count);
-  if (count > lastCartCount) { bumpEl(el("cart-nav-badge")); bumpEl(el("header-cart-badge")); }
+  if (count > lastCartCount) { bumpEl(el("cart-nav-badge")); }
   lastCartCount = count;
   saveCart();
   if (count === 0) { bar.classList.remove("visible"); return; }
@@ -1072,7 +1075,7 @@ document.querySelectorAll("#bottom-nav .nav-item").forEach((btn) => {
   });
 });
 
-el("header-cart").addEventListener("click", () => { renderCart(); navPush("cart"); });
+el("header-contact").addEventListener("click", openContact);
 el("filter-btn").addEventListener("click", openFilters);
 
 // Кнопка «Наверх» — появляется при длинной прокрутке каталога.
@@ -1187,15 +1190,17 @@ function osTheme() {
   catch (_) { return "light"; }
 }
 function loadTheme() {
+  // По умолчанию — светлая тема для всех. Тёмную пользователь включает сам в
+  // профиле (тогда выбор сохраняется в CloudStorage и подхватывается при входе).
   return new Promise((resolve) => {
     const cs = tg.CloudStorage;
     const done = (v) => { state.theme = v; applyTheme(v); resolve(); };
-    if (!cs || !cs.getItem) return done(osTheme());
+    if (!cs || !cs.getItem) return done("light");
     try {
       cs.getItem("theme", (err, val) => {
-        done(!err && (val === "light" || val === "dark") ? val : osTheme());
+        done(!err && (val === "light" || val === "dark") ? val : "light");
       });
-    } catch (_) { done(osTheme()); }
+    } catch (_) { done("light"); }
   });
 }
 
@@ -1212,6 +1217,39 @@ function loadHaptics() {
       cs.getItem("haptics", (err, val) => { state.haptics = !(!err && val === "0"); resolve(); });
     } catch (_) { state.haptics = true; resolve(); }
   });
+}
+
+// ---------------------------------------------------------------------
+// Контакты и чат менеджера. Ссылка на чат — по публичному @username из настроек
+// магазина (числовой ID для этого не годится). Открываем через openTelegramLink.
+// ---------------------------------------------------------------------
+function managerChatUrl() {
+  const u = (state.shop?.manager_username || "").replace(/^@/, "").trim();
+  return u ? `https://t.me/${u}` : "";
+}
+function openTgChat(url) {
+  if (!url) return;
+  try { tg.openTelegramLink ? tg.openTelegramLink(url) : window.open(url, "_blank"); }
+  catch (_) { window.open(url, "_blank"); }
+}
+// Кнопка «Уточнить у менеджера» на товаре: в чат, если задан username; иначе —
+// открыть лист контактов (телефон/Instagram).
+function openManagerChat() {
+  const url = managerChatUrl();
+  if (url) openTgChat(url); else openContact();
+}
+function openContact() {
+  const s = state.shop || {};
+  const ig = (s.instagram || "").replace(/^@/, "");
+  const mgrUser = (s.manager_username || "").replace(/^@/, "").trim();
+  const rows = [];
+  if (mgrUser) rows.push(`<button class="pm-item" id="ct-manager" type="button"><span>💬 ${t("write_manager")}</span><span class="pm-val">@${mgrUser}</span></button>`);
+  if (s.phone) rows.push(`<a class="pm-item" href="tel:${s.phone}"><span>📞 ${t("call")}</span><span class="pm-val">${s.phone}</span></a>`);
+  if (ig) rows.push(`<a class="pm-item" href="https://instagram.com/${ig}" target="_blank" rel="noopener"><span>📸 Instagram</span><span class="pm-val">@${ig}</span></a>`);
+  if (s.address) rows.push(`<div class="pm-item"><span>📍 ${t("address_title")}</span><span class="pm-val">${s.address}</span></div>`);
+  el("contact-content").innerHTML = `<div class="profile-menu"><div class="pm-block">${rows.join("") || `<div class="pm-item"><span>${t("contact")}</span></div>`}</div></div>`;
+  el("ct-manager")?.addEventListener("click", () => openTgChat(managerChatUrl()));
+  navPush("contact");
 }
 
 // ---------------------------------------------------------------------

@@ -545,6 +545,10 @@ async function openProductEdit(productId) {
         <span>Показывать как доп-товар («Добавьте к заказу»)</span>
       </label>
       <label class="checkbox-row" style="margin:2px 0 8px;">
+        <input type="checkbox" name="price_on_request" ${p?.price_on_request ? "checked" : ""}/>
+        <span>Стоимость по запросу (вместо «в корзину» — «Уточнить у менеджера»)</span>
+      </label>
+      <label class="checkbox-row" style="margin:2px 0 8px;">
         <input type="checkbox" name="track_stock" id="track-stock-toggle" ${p?.track_stock ? "checked" : ""}/>
         <span>Штучный товар — свой остаток (шары, вазы, сладости)</span>
       </label>
@@ -645,6 +649,7 @@ async function openProductEdit(productId) {
       badge: fd.get("badge") || "",
       track_stock: fd.get("track_stock") ? 1 : 0,
       stock_qty: parseFloat(fd.get("stock_qty")) || 0,
+      price_on_request: fd.get("price_on_request") ? 1 : 0,
       variants: variantRows,
     };
 
@@ -1223,6 +1228,7 @@ function renderSettings() {
         <h3 class="settings-group">Контакты</h3>
         <div class="field"><label>Телефон</label><input name="shop_phone" value="${esc(s.shop_phone)}" placeholder="+995 5xx xx xx xx"/></div>
         <div class="field"><label>Instagram (ник без @)</label><input name="shop_instagram" value="${esc(s.shop_instagram)}" placeholder="flowers_batum_flower"/></div>
+        <div class="field"><label>Username менеджера в Telegram (для кнопки «Написать менеджеру», без @)</label><input name="manager_username" value="${esc(s.manager_username)}" placeholder="FlowersBatumFlower"/></div>
 
         <h3 class="settings-group">Онлайн-оплата (PayPal)</h3>
         <label class="checkbox-row" style="margin:2px 0 8px;">
@@ -1286,6 +1292,7 @@ function renderSettings() {
           default_courier_id: fd.get("default_courier_id"),
           shop_phone: fd.get("shop_phone"),
           shop_instagram: fd.get("shop_instagram"),
+          manager_username: fd.get("manager_username"),
           paypal_enabled: fd.get("paypal_enabled") ? "1" : "",
           pay_rate_eur: fd.get("pay_rate_eur"),
           pay_rate_usd: fd.get("pay_rate_usd"),

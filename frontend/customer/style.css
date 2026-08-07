@@ -98,6 +98,7 @@
 .pc-row { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; gap: 8px; }
 .pc-price { font-size: 14px; font-weight: 800; color: var(--ink); }
 .pc-price small { font-weight: 600; color: var(--ink-muted); font-size: 11px; }
+.pc-price-req { font-size: 12px; font-weight: 700; color: var(--ink-muted); }
 .pc-plus {
   width: 36px; height: 36px; border-radius: 11px; background: var(--rose-soft); color: var(--rose);
   border: none; cursor: pointer; display: flex; align-items: center; justify-content: center;

@@ -116,6 +116,9 @@ def bootstrap():
     if not conn.execute("SELECT 1 FROM products WHERE sort_order != 0 LIMIT 1").fetchone():
         conn.execute("UPDATE products SET sort_order = id")
         conn.commit()
+    # «Стоимость по запросу»: у товара нет фиксированной цены — вместо «в корзину»
+    # показываем «Уточнить у менеджера». Можно включить любому букету.
+    _add_column_if_missing(conn, "products", "price_on_request", "INTEGER NOT NULL DEFAULT 0")
     # Разовый перенос старых product_recipe → recipe_lines (на товар целиком), если пусто.
     if not conn.execute("SELECT 1 FROM recipe_lines LIMIT 1").fetchone():
         for r in conn.execute("SELECT product_id, flower_stock_id, quantity_needed FROM product_recipe").fetchall():
@@ -805,6 +808,7 @@ SHOP_DEFAULTS = {
     "slot_capacity": "2",          # макс. заказов на один 2-часовой слот доставки
     "shop_phone": "",
     "shop_instagram": "flowers_batum_flower",
+    "manager_username": "FlowersBatumFlower",   # @username для кнопки «Написать менеджеру» (без @)
     "express_delivery_text": "в течение часа",
     "delivery_payment_info": (
         "Доставка по Батуми при заказе от 100 ₾: 15 ₾ до 22:00, 30 ₾ с 22:00 до 00:00. "
@@ -1045,6 +1049,7 @@ def api_shop():
         "address": (loc["address"] if loc else "") or "",
         "phone": get_setting_or_default("shop_phone"),
         "instagram": get_setting_or_default("shop_instagram"),
+        "manager_username": get_setting_or_default("manager_username"),
         "min_delivery_amount": _num_setting("min_delivery_amount"),
         "delivery_fee_day": _num_setting("delivery_fee_day"),
         "delivery_fee_night": _num_setting("delivery_fee_night"),
@@ -2019,8 +2024,9 @@ def api_admin_products():
         next_sort = conn.execute("SELECT COALESCE(MAX(sort_order), 0) + 1 AS n FROM products").fetchone()["n"]
         cur = conn.execute(
             "INSERT INTO products (location_id, category_id, name, description, composition, "
-            "photo_url, status, occasion_tags, is_addon, badge, track_stock, stock_qty, sort_order) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "photo_url, status, occasion_tags, is_addon, badge, track_stock, stock_qty, sort_order, "
+            "price_on_request) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 body["location_id"], cat_ids[0], body["name"],
                 body.get("description", ""), body.get("composition", ""),
@@ -2029,6 +2035,7 @@ def api_admin_products():
                 1 if body.get("is_addon") else 0, _clean_badge(body.get("badge")),
                 1 if body.get("track_stock") else 0, float(body.get("stock_qty") or 0),
                 next_sort,
+                1 if body.get("price_on_request") else 0,
             ),
         )
         product_id = cur.lastrowid
@@ -2079,6 +2086,7 @@ def api_admin_product_edit(product_id):
         "badge": _clean_badge(body.get("badge")),
         "track_stock": 1 if body.get("track_stock") else 0,
         "stock_qty": float(body.get("stock_qty") or 0),
+        "price_on_request": 1 if body.get("price_on_request") else 0,
     }
     if body.get("photo_url"):
         fields["photo_url"] = body["photo_url"]
@@ -2581,7 +2589,7 @@ def api_admin_staff_edit(staff_id):
 EDITABLE_SETTINGS = [
     "min_delivery_amount", "delivery_fee_day", "delivery_fee_night", "delivery_day_end",
     "slot_capacity", "default_courier_id",
-    "shop_phone", "shop_instagram", "express_delivery_text", "delivery_payment_info",
+    "shop_phone", "shop_instagram", "manager_username", "express_delivery_text", "delivery_payment_info",
     "disclaimer_note",
     "paypal_enabled", "pay_rate_eur", "pay_rate_usd",
 ]

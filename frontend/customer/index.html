@@ -20,9 +20,8 @@
           <span class="brand-loc"><span class="dot"></span> <span data-i18n="brand_loc">Батуми · доставка сегодня</span></span>
         </div>
       </div>
-      <button class="avatar-btn cart-btn" id="header-cart" type="button" aria-label="Корзина">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16l-1.5 11.5a2 2 0 0 1-2 1.7H7.5a2 2 0 0 1-2-1.7L4 6z"/><path d="M9 6a3 3 0 0 1 6 0"/></svg>
-        <span class="cart-btn-badge" id="header-cart-badge" hidden>0</span>
+      <button class="avatar-btn contact-btn" id="header-contact" type="button" aria-label="Связаться">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H8l-4 4V6a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2z"/></svg>
       </button>
     </header>
 
@@ -196,6 +195,14 @@
   <div class="sheet" id="profile-sheet">
     <div class="sheet-handle"></div>
     <div id="profile-content"></div>
+  </div>
+
+  <!-- Контакты (из верхней кнопки «Связаться») -->
+  <div class="sheet-backdrop" id="contact-backdrop" data-close="contact"></div>
+  <div class="sheet" id="contact-sheet">
+    <div class="sheet-handle"></div>
+    <h2 data-i18n="contact">Связаться</h2>
+    <div id="contact-content"></div>
   </div>
 
   <!-- Мои заказы -->
