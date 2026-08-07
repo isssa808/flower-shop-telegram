@@ -107,10 +107,24 @@
   cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none;
 }
 .cr-drag:active { cursor: grabbing; }
+/* Перетаскиваемая карточка вынута из потока и следует за пальцем (top ведётся из
+   JS). transform:scale — «рост при зажатии», анимируется отдельно от позиции. */
 .catalog-row.dragging {
-  opacity: 0.9; box-shadow: 0 8px 22px rgba(0,0,0,0.22);
-  transform: scale(1.02); position: relative; z-index: 5;
+  position: fixed; z-index: 50; margin: 0;
+  box-shadow: 0 10px 28px rgba(0,0,0,0.28);
+  transform: scale(1.04);
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+  cursor: grabbing;
 }
+/* Плейсхолдер держит место карточки и подсвечивает целевой слот. */
+.catalog-row-ph {
+  box-sizing: border-box;
+  border: 2px dashed var(--border);
+  border-radius: var(--radius-m);
+  background: rgba(0,0,0,0.03);
+}
+/* Кнопки действий в каталоге чуть крупнее — удобнее попадать пальцем. */
+.catalog-row .cr-actions .btn-icon { font-size: 19px; padding: 8px; }
 
 /* --- склад --- */
 .stock-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }

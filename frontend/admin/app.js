@@ -361,7 +361,23 @@ function startCatalogDrag(e, wrap) {
   e.preventDefault();
   const dragEl = e.target.closest(".catalog-row");
   if (!dragEl) return;
+
+  // Схватили карточку: запоминаем её геометрию и точку захвата внутри неё.
+  const rect = dragEl.getBoundingClientRect();
+  const grabY = e.clientY - rect.top;
+  tg.HapticFeedback?.impactOccurred?.("light");
+
+  // Плейсхолдер держит место карточки в потоке (показывает целевой слот), пока
+  // сама карточка «летит» за пальцем в position: fixed.
+  const ph = document.createElement("div");
+  ph.className = "catalog-row-ph";
+  ph.style.height = rect.height + "px";
+  dragEl.parentNode.insertBefore(ph, dragEl);
+
   dragEl.classList.add("dragging");
+  dragEl.style.width = rect.width + "px";
+  dragEl.style.left = rect.left + "px";
+  dragEl.style.top = (e.clientY - grabY) + "px";
 
   const rowAfter = (y) => {
     const rows = [...wrap.querySelectorAll(".catalog-row:not(.dragging)")];
@@ -376,9 +392,10 @@ function startCatalogDrag(e, wrap) {
 
   const onMove = (ev) => {
     ev.preventDefault();
+    dragEl.style.top = (ev.clientY - grabY) + "px";   // карточка следует за пальцем 1:1
     const after = rowAfter(ev.clientY);
-    if (after == null) wrap.appendChild(dragEl);
-    else if (after !== dragEl.nextSibling) wrap.insertBefore(dragEl, after);
+    if (after == null) wrap.appendChild(ph);
+    else if (after !== ph.nextSibling) wrap.insertBefore(ph, after);
     // Лёгкий автоскролл у краёв экрана.
     const m = 90;
     if (ev.clientY < m) window.scrollBy(0, -14);
@@ -389,7 +406,11 @@ function startCatalogDrag(e, wrap) {
     window.removeEventListener("pointermove", onMove);
     window.removeEventListener("pointerup", onUp);
     window.removeEventListener("pointercancel", onUp);
+    // Возвращаем карточку в поток на место плейсхолдера.
+    wrap.insertBefore(dragEl, ph);
+    ph.remove();
     dragEl.classList.remove("dragging");
+    dragEl.style.width = dragEl.style.left = dragEl.style.top = "";
     const order = [...wrap.querySelectorAll(".catalog-row")].map((r) => Number(r.dataset.row));
     // Пересобираем state.products в новом порядке (чтобы будущие ре-рендеры совпадали).
     const byId = new Map(state.products.map((p) => [p.id, p]));
