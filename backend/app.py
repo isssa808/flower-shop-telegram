@@ -2002,8 +2002,7 @@ def _finalize_paypal(pp_order_id, amount, currency, raw):
     enqueue_notification(staff_chat, order_text, reply_markup=_order_action_markup(order_id),
                          fallback_chat_id=STAFF_CHAT_ID, order_id=order_id, is_root=True,
                          entities=order_ents, photo_url=order_photo)
-    if order_row and order_row["customer_tg_id"]:
-        enqueue_notification(order_row["customer_tg_id"], f"Оплата получена ✅ Заказ #{order_id} принят в работу.")
+    # Клиенту в ЛС про оплату НЕ пишем — подтверждение он видит в приложении.
     return "paid"
 
 
