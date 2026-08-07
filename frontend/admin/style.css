@@ -83,6 +83,15 @@
 .order-card .btn-block { margin-top: 10px; }
 .courier-done { margin-top: 10px; font-weight: 700; color: var(--petrol); font-size: 13.5px; }
 
+/* Кнопка флориста «Букет собран» — заметная, отдельным зелёным цветом */
+.btn-assembled { background: #2E8B57; color: #fff; border: none; margin-top: 10px; font-weight: 700; }
+.btn-assembled:hover { background: #256e46; }
+/* Плашка готовности в карточке курьера */
+.ready-badge { margin-top: 10px; padding: 9px 12px; border-radius: var(--radius-s); font-size: 13.5px; font-weight: 700; text-align: center; }
+.ready-yes { background: rgba(46, 139, 87, 0.15); color: #2E8B57; }
+.ready-wait { background: var(--surface); color: var(--ink-muted); }
+.ready-go { background: var(--green-soft); color: var(--petrol); }
+
 .status-select {
   font-size: 12px; font-weight: 700; padding: 6px 10px; border-radius: 8px;
   border: 1.5px solid var(--border); background: var(--surface); color: var(--ink);

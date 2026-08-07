@@ -141,6 +141,8 @@ CREATE TABLE IF NOT EXISTS orders (
     delivery_zone TEXT,                             -- batumi | outside (доставка только по Батуми)
     delivery_fee REAL NOT NULL DEFAULT 0,
     total REAL NOT NULL DEFAULT 0,                   -- товары + доставка
+    staff_chat_id TEXT,                             -- куда ушло корневое сообщение заказа в чат персонала
+    staff_msg_id INTEGER,                           -- message_id этого сообщения (для reply «Доставлен» и edit «Собран»)
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -202,6 +204,11 @@ CREATE TABLE IF NOT EXISTS notifications (
     reply_markup TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
     attempts INTEGER NOT NULL DEFAULT 0,
+    order_id INTEGER,                               -- к какому заказу относится (для записи message_id)
+    is_root INTEGER NOT NULL DEFAULT 0,             -- 1 = корневое сообщение заказа (ловим его message_id)
+    reply_to INTEGER,                               -- ответить на это сообщение (reply_to_message_id)
+    photo_url TEXT,                                 -- отправить как фото (sendPhoto)
+    entities TEXT,                                  -- JSON message-entities (синее упоминание курьера)
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 

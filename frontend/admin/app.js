@@ -144,6 +144,8 @@ function renderOrders() {
         ${o.assigned_courier_name ? `<br/>🛵 Курьер: ${o.assigned_courier_name}` : ""}
         ${times ? `<br/><span class="order-times">${times}</span>` : ""}
       </div>
+      ${(o.status === "new" || o.status === "assembling")
+        ? `<button class="btn btn-block btn-assembled" data-assembled="${o.id}">✅ Букет собран</button>` : ""}
       <select class="status-select" data-order-id="${o.id}">
         ${Object.entries(STATUS_LABELS).map(([val, label]) => `<option value="${val}" ${o.status === val ? "selected" : ""}>${label}</option>`).join("")}
       </select>
@@ -151,6 +153,22 @@ function renderOrders() {
       }
     )
     .join("");
+
+  wrap.querySelectorAll("[data-assembled]").forEach((b) => {
+    b.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      try {
+        await apiFetch(`/api/admin/orders/${b.dataset.assembled}/status`, {
+          method: "PUT", body: { status: "assembled" }, tg,
+        });
+        showToast("Отмечено «Собран»");
+        await loadOrders();
+        renderOrders();
+      } catch (err) {
+        showToast(err?.data?.detail || "Не удалось отметить");
+      }
+    });
+  });
 
   wrap.querySelectorAll(".status-select").forEach((sel) => {
     sel.addEventListener("click", (e) => e.stopPropagation());
@@ -198,6 +216,10 @@ function renderCourierOrders() {
         ${o.items.map((i) => `${i.product_name} ×${i.quantity}`).join(", ")}
         ${o.card_message ? `<br/>Открытка: «${o.card_message}»` : ""}
       </div>
+      ${isDone ? "" : (
+        o.status === "assembled" ? `<div class="ready-badge ready-yes">✅ Собран — можно забирать</div>`
+        : o.status === "out_for_delivery" ? `<div class="ready-badge ready-go">🚚 В доставке</div>`
+        : `<div class="ready-badge ready-wait">⏳ Собирается</div>`)}
       ${isDone
         ? `<div class="courier-done">✓ Доставлено${o.delivered_at ? ` · ${o.delivered_at}` : ""}</div>`
         : `<button class="btn btn-primary btn-block" data-deliver="${o.id}">Доставлено</button>`}

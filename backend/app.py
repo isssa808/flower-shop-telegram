@@ -101,6 +101,15 @@ def bootstrap():
     _add_column_if_missing(conn, "orders", "stock_returned", "INTEGER NOT NULL DEFAULT 0")
     _add_column_if_missing(conn, "orders", "stale_reminded", "INTEGER NOT NULL DEFAULT 0")
     _add_column_if_missing(conn, "orders", "slot_reminded", "INTEGER NOT NULL DEFAULT 0")
+    # Корневое сообщение заказа в чате персонала: сохраняем message_id, чтобы потом
+    # ответить в тред («Доставлен») и отредактировать («Собран — готов к выдаче»).
+    _add_column_if_missing(conn, "orders", "staff_chat_id", "TEXT")
+    _add_column_if_missing(conn, "orders", "staff_msg_id", "INTEGER")
+    _add_column_if_missing(conn, "notifications", "order_id", "INTEGER")
+    _add_column_if_missing(conn, "notifications", "is_root", "INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing(conn, "notifications", "reply_to", "INTEGER")
+    _add_column_if_missing(conn, "notifications", "photo_url", "TEXT")
+    _add_column_if_missing(conn, "notifications", "entities", "TEXT")
     # Склад: группа/тип, размер пачки по умолчанию, фото; вариант в позиции заказа.
     _add_column_if_missing(conn, "flower_stock", "flower_type", "TEXT")
     _add_column_if_missing(conn, "flower_stock", "pack_size", "REAL NOT NULL DEFAULT 0")
@@ -281,62 +290,103 @@ bootstrap()
 NOTIFY_MAX_ATTEMPTS = 12
 
 
-def _send_message_api(chat_id, text, reply_markup=None):
-    """Один вызов sendMessage. Возвращает статус:
-      "ok"        — доставлено;
-      "permanent" — Telegram отклонил (неверный chat_id, бот не в чате, блок) —
-                    повторять бессмысленно;
-      "transient" — сеть/таймаут/5xx — можно повторить позже;
-      "skip"      — нечего слать (нет chat_id или тестовый токен)."""
+def _send_message_api(chat_id, text, reply_markup=None, reply_to=None, photo_url=None, entities=None):
+    """Один вызов sendMessage/sendPhoto. Возвращает кортеж (status, message_id):
+      status: "ok" | "permanent" | "transient" | "skip"; message_id — id
+      отправленного сообщения (нужен, чтобы потом ответить в тред/отредактировать).
+      photo_url задан → sendPhoto (caption=text); reply_to → ответ в тред;
+      entities → message-entities (синее упоминание курьера)."""
     if not chat_id or BOT_TOKEN == "LOCAL_DEV_TOKEN":
         app.logger.info(f"[notify skip] to={chat_id}: {text}")
-        return "skip"
-    payload = {"chat_id": chat_id, "text": text}
-    if reply_markup:
-        payload["reply_markup"] = json.loads(reply_markup) if isinstance(reply_markup, str) else reply_markup
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    data = json.dumps(payload).encode()
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+        return "skip", None
+    ents = json.loads(entities) if isinstance(entities, str) else entities
+    rm = json.loads(reply_markup) if isinstance(reply_markup, str) else reply_markup
+    # Фото шлём только если подпись влезает в лимит Telegram (1024); иначе — текстом.
+    use_photo = bool(photo_url) and len(text or "") <= 1024
+
+    def _build(as_photo):
+        if as_photo:
+            p = {"chat_id": chat_id, "photo": photo_url, "caption": text}
+            if ents:
+                p["caption_entities"] = ents
+        else:
+            p = {"chat_id": chat_id, "text": text}
+            if ents:
+                p["entities"] = ents
+        if rm:
+            p["reply_markup"] = rm
+        if reply_to:
+            p["reply_to_message_id"] = reply_to
+            p["allow_sending_without_reply"] = True
+        return p
+
+    def _do(method, payload):
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read())
+
     try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            return "ok" if json.loads(resp.read()).get("ok", False) else "permanent"
+        body = _do("sendPhoto" if use_photo else "sendMessage", _build(use_photo))
+        if body.get("ok"):
+            return "ok", (body.get("result") or {}).get("message_id")
+        return "permanent", None
     except urllib.error.HTTPError as e:
-        # 4xx (chat not found / bot kicked / blocked) — постоянная; 5xx — временная.
+        # Фото не удалось (напр. Telegram не смог забрать картинку) — шлём текстом,
+        # чтобы заказ точно дошёл.
+        if use_photo:
+            try:
+                body = _do("sendMessage", _build(False))
+                if body.get("ok"):
+                    return "ok", (body.get("result") or {}).get("message_id")
+            except Exception:
+                pass
         kind = "permanent" if 400 <= e.code < 500 else "transient"
         app.logger.warning(f"[notify {kind}] to={chat_id}: HTTP {e.code}")
-        return kind
+        return kind, None
     except (urllib.error.URLError, TimeoutError, ValueError) as e:
         app.logger.warning(f"[notify transient] to={chat_id}: {e}")
-        return "transient"
+        return "transient", None
 
 
-def enqueue_notification(chat_id, text, reply_markup=None, fallback_chat_id=None):
+def enqueue_notification(chat_id, text, reply_markup=None, fallback_chat_id=None,
+                         order_id=None, is_root=False, reply_to=None, photo_url=None, entities=None):
     """Кладём уведомление в outbox (переживает падение сети) и сразу пробуем
     отправить. Заказ уже в БД, поэтому не потеряется в любом случае.
     fallback_chat_id — куда доставить, если основной чат отклонён навсегда
     (напр. в личку владельца, когда общий чат настроен с ошибкой) — чтобы не
-    было «тишины везде»."""
+    было «тишины везде». order_id+is_root — пометка корневого сообщения заказа:
+    после успешной отправки его message_id пишем в orders (для reply/edit).
+    reply_to/photo_url/entities — ответ в тред / фото / синее упоминание курьера."""
     if not chat_id:
         # Если основного адреса нет, но есть запасной — шлём сразу туда.
         if fallback_chat_id:
-            enqueue_notification(fallback_chat_id, text, reply_markup)
+            enqueue_notification(fallback_chat_id, text, reply_markup, order_id=order_id,
+                                 is_root=is_root, reply_to=reply_to, photo_url=photo_url, entities=entities)
         return
     rm_json = json.dumps(reply_markup) if isinstance(reply_markup, dict) else reply_markup
+    ent_json = json.dumps(entities) if isinstance(entities, (list, dict)) else entities
     conn = get_db()
     cur = conn.execute(
-        "INSERT INTO notifications (chat_id, text, reply_markup, status, attempts) "
-        "VALUES (?, ?, ?, 'pending', 0)",
-        (str(chat_id), text, rm_json),
+        "INSERT INTO notifications (chat_id, text, reply_markup, status, attempts, "
+        "order_id, is_root, reply_to, photo_url, entities) "
+        "VALUES (?, ?, ?, 'pending', 0, ?, ?, ?, ?, ?)",
+        (str(chat_id), text, rm_json, order_id, 1 if is_root else 0, reply_to, photo_url, ent_json),
     )
     note_id = cur.lastrowid
     conn.commit()
     conn.close()
     if BOT_TOKEN == "LOCAL_DEV_TOKEN":
         return
-    status = _send_message_api(chat_id, text, rm_json)
+    status, mid = _send_message_api(chat_id, text, rm_json, reply_to=reply_to,
+                                    photo_url=photo_url, entities=ent_json)
     if status == "ok":
         conn = get_db()
         conn.execute("UPDATE notifications SET status='sent', attempts=1 WHERE id=?", (note_id,))
+        if is_root and mid and order_id:
+            conn.execute("UPDATE orders SET staff_chat_id=?, staff_msg_id=? WHERE id=?",
+                         (str(chat_id), mid, order_id))
         conn.commit()
         conn.close()
     elif status == "permanent":
@@ -347,7 +397,8 @@ def enqueue_notification(chat_id, text, reply_markup=None, fallback_chat_id=None
         app.logger.error(f"[notify give up] id={note_id} chat={chat_id} (постоянная ошибка)")
         # Откат: доставить запасному адресу (владельцу в личку), если он другой.
         if fallback_chat_id and str(fallback_chat_id) != str(chat_id):
-            enqueue_notification(fallback_chat_id, text, reply_markup)
+            enqueue_notification(fallback_chat_id, text, reply_markup, order_id=order_id,
+                                 is_root=is_root, reply_to=reply_to, photo_url=photo_url, entities=entities)
         else:
             _alert_delivery_failure(chat_id, text)
     # transient — оставляем pending, досыл фоновым потоком
@@ -379,11 +430,15 @@ def _notify_process_pending():
     ).fetchall()
     conn.close()
     for r in rows:
-        status = _send_message_api(r["chat_id"], r["text"], r["reply_markup"])
+        status, mid = _send_message_api(r["chat_id"], r["text"], r["reply_markup"],
+                                        reply_to=r["reply_to"], photo_url=r["photo_url"], entities=r["entities"])
         alert = False
         conn = get_db()
         if status == "ok":
             conn.execute("UPDATE notifications SET status='sent', attempts=attempts+1 WHERE id=?", (r["id"],))
+            if r["is_root"] and mid and r["order_id"]:
+                conn.execute("UPDATE orders SET staff_chat_id=?, staff_msg_id=? WHERE id=?",
+                             (str(r["chat_id"]), mid, r["order_id"]))
         elif status == "permanent":
             conn.execute("UPDATE notifications SET status='failed', attempts=attempts+1 WHERE id=?", (r["id"],))
             app.logger.error(f"[notify give up] id={r['id']} chat={r['chat_id']} (постоянная ошибка)")
@@ -561,12 +616,16 @@ def _tg_call(method, payload):
         return False
 
 
-def _edit_message_text(chat_id, message_id, text):
+def _edit_message_text(chat_id, message_id, text, entities=None):
     """Меняем текст ранее отправленного сообщения (и убираем у него кнопки —
-    editMessageText без reply_markup снимает инлайн-клавиатуру)."""
+    editMessageText без reply_markup снимает инлайн-клавиатуру). entities —
+    message-entities (чтобы синее упоминание курьера осталось кликабельным)."""
     if not chat_id or not message_id:
         return
-    _tg_call("editMessageText", {"chat_id": chat_id, "message_id": message_id, "text": text})
+    payload = {"chat_id": chat_id, "message_id": message_id, "text": text}
+    if entities:
+        payload["entities"] = json.loads(entities) if isinstance(entities, str) else entities
+    _tg_call("editMessageText", payload)
 
 
 def _answer_callback(cq_id, text=None, alert=False):
@@ -1384,6 +1443,65 @@ def _order_action_markup(order_id):
     ]]}
 
 
+def _utf16_len(s):
+    """Длина строки в UTF-16 code units — в них Telegram считает offset/length у
+    message-entities (эмодзи занимают 2 единицы)."""
+    return len((s or "").encode("utf-16-le")) // 2
+
+
+def _order_photo_url(conn, order_id):
+    """Абсолютный URL фото первого товара заказа для sendPhoto. None, если фото
+    нет или это заглушка/SVG (Telegram их как фото не примет)."""
+    row = conn.execute(
+        "SELECT p.photo_url AS ph FROM order_items oi JOIN products p ON p.id = oi.product_id "
+        "WHERE oi.order_id = ? AND oi.product_id IS NOT NULL ORDER BY oi.id LIMIT 1",
+        (order_id,),
+    ).fetchone()
+    url = row["ph"] if row else None
+    if not url:
+        return None
+    low = url.lower()
+    if "placeholder" in low or low.split("?")[0].endswith(".svg"):
+        return None
+    if url.startswith("http"):
+        return url
+    return (APP_URL.rstrip("/") + url) if APP_URL else None
+
+
+def build_order_message(conn, order_id, ready=False, prefix=""):
+    """Единый сборщик текста заказа для чата персонала. Возвращает (text, entities).
+    Дописывает синее упоминание назначенного курьера (text_mention по Telegram ID —
+    имя видно, пингует курьера), а при ready=True — строку «✅ Собран — готов к
+    выдаче». prefix — необязательная приставка (напр. «💳 ОПЛАЧЕНО»), учитывается в
+    расчёте offset упоминания."""
+    order = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
+    items = conn.execute(
+        "SELECT product_name, variant_label, price, quantity FROM order_items WHERE order_id=?",
+        (order_id,),
+    ).fetchall()
+    text = prefix + format_order_message(dict(order), [dict(i) for i in items])
+    entities = None
+    if order["fulfillment_type"] == "delivery" and order["assigned_staff_id"]:
+        c = conn.execute(
+            "SELECT name, telegram_id FROM staff WHERE id=? AND role='courier'",
+            (order["assigned_staff_id"],),
+        ).fetchone()
+        tg_id = str(c["telegram_id"]).strip() if c and c["telegram_id"] else ""
+        if c and tg_id.lstrip("-").isdigit():
+            name = (c["name"] or "курьер").strip() or "курьер"
+            lead = text + "\n\n🛵 Курьер: "
+            entities = [{
+                "type": "text_mention",
+                "offset": _utf16_len(lead),
+                "length": _utf16_len(name),
+                "user": {"id": int(tg_id)},
+            }]
+            text = lead + name
+    if ready:
+        text += "\n\n✅ Собран — готов к выдаче"
+    return text, entities
+
+
 @app.route("/api/orders", methods=["POST"])
 @require_auth
 def api_create_order():
@@ -1557,23 +1675,26 @@ def api_create_order():
     for pid, need in simple_need.items():
         cur.execute("UPDATE products SET stock_qty = stock_qty - ? WHERE id = ?", (need, pid))
 
-    # Полную строку заказа читаем обратно для богатого уведомления.
-    order_row = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
-    item_rows = conn.execute(
-        "SELECT product_name, variant_label, price, quantity FROM order_items WHERE order_id=?",
-        (order_id,),
-    ).fetchall()
+    # Текст заказа (+ синее упоминание курьера) и фото товара собираем до закрытия conn.
+    order_text, order_ents = build_order_message(conn, order_id)
+    order_photo = _order_photo_url(conn, order_id)
     conn.commit()
     conn.close()
 
     # Уведомление в общий чат персонала — через outbox (не потеряется, досылается).
     # fallback = личка владельца: если общий чат настроен с ошибкой, заказ всё равно дойдёт.
+    # Корневое сообщение (is_root) — его message_id сохраняется в orders для reply/edit.
+    staff_chat = resolve_staff_chat_id()
     enqueue_notification(
-        resolve_staff_chat_id(),
-        format_order_message(dict(order_row), [dict(i) for i in item_rows]),
+        staff_chat, order_text,
         reply_markup=_order_action_markup(order_id),
         fallback_chat_id=STAFF_CHAT_ID,
+        order_id=order_id, is_root=True, entities=order_ents,
     )
+    # Фото товара — отдельным сообщением сразу под заказом (фото всегда, если есть).
+    if order_photo:
+        enqueue_notification(staff_chat, f"🌸 Заказ #{order_id}",
+                             photo_url=order_photo, fallback_chat_id=STAFF_CHAT_ID)
     return jsonify({"id": order_id, "total": total, "delivery_fee": delivery_fee,
                     "items_total": items_total, "status": "new"}), 201
 
@@ -1803,18 +1924,20 @@ def _finalize_paypal(pp_order_id, amount, currency, raw):
     conn.execute("UPDATE orders SET payment_status='paid' WHERE id=?", (order_id,))
     shortage = _activate_paid_order(conn, order_id)
     order_row = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
-    item_rows = conn.execute(
-        "SELECT product_name, variant_label, price, quantity FROM order_items WHERE order_id=?",
-        (order_id,),
-    ).fetchall()
+    # Текст (+ упоминание курьера) и фото собираем до закрытия conn.
+    order_text, order_ents = build_order_message(conn, order_id, prefix="💳 ОПЛАЧЕНО (PayPal)\n")
+    if shortage:
+        order_text += "\n⚠️ Проверьте остатки: " + ", ".join(sorted(set(shortage)))
+    order_photo = _order_photo_url(conn, order_id)
     conn.commit()
     conn.close()
-    # Уведомления вне транзакции (через outbox).
-    msg = "💳 ОПЛАЧЕНО (PayPal)\n" + format_order_message(dict(order_row), [dict(i) for i in item_rows])
-    if shortage:
-        msg += "\n⚠️ Проверьте остатки: " + ", ".join(sorted(set(shortage)))
-    enqueue_notification(resolve_staff_chat_id(), msg,
-                         reply_markup=_order_action_markup(order_id), fallback_chat_id=STAFF_CHAT_ID)
+    # Уведомления вне транзакции (через outbox). Корневое сообщение — с сохранением message_id.
+    staff_chat = resolve_staff_chat_id()
+    enqueue_notification(staff_chat, order_text, reply_markup=_order_action_markup(order_id),
+                         fallback_chat_id=STAFF_CHAT_ID, order_id=order_id, is_root=True, entities=order_ents)
+    if order_photo:
+        enqueue_notification(staff_chat, f"🌸 Заказ #{order_id}",
+                             photo_url=order_photo, fallback_chat_id=STAFF_CHAT_ID)
     if order_row and order_row["customer_tg_id"]:
         enqueue_notification(order_row["customer_tg_id"], f"Оплата получена ✅ Заказ #{order_id} принят в работу.")
     return "paid"
@@ -2609,7 +2732,7 @@ def api_admin_settings():
             # в эффективный чат (настройка или, если пусто, дефолт из env).
             target = resolve_staff_chat_id()
             if target:
-                status = _send_message_api(
+                status, _mid = _send_message_api(
                     target, "✅ Сюда будут приходить уведомления о новых заказах Flowers Batum Flower."
                 )
                 chat_test = {"target": str(target), "status": status}
@@ -2906,9 +3029,26 @@ def change_order_status(order_id, new_status, actor_name=None, notify_staff=True
     label = STATUS_LABELS_RU.get(new_status, new_status)
     if updated["customer_tg_id"]:
         enqueue_notification(updated["customer_tg_id"], f"Статус заказа #{order_id}: {label}")
+    # «Собран» — дописываем «✅ Собран — готов к выдаче» прямо в сообщение заказа
+    # (курьер видит готовность в чате). Упоминание курьера сохраняем кликабельным.
+    if new_status == "assembled" and updated["staff_msg_id"]:
+        conn2 = get_db()
+        try:
+            ready_text, ready_ents = build_order_message(conn2, order_id, ready=True)
+        finally:
+            conn2.close()
+        _edit_message_text(updated["staff_chat_id"] or resolve_staff_chat_id(),
+                           updated["staff_msg_id"], ready_text, entities=ready_ents)
     if notify_staff:
-        enqueue_notification(resolve_staff_chat_id(), f"Заказ #{order_id}: статус → {label}",
-                             fallback_chat_id=STAFF_CHAT_ID)
+        if new_status == "delivered":
+            # Ответом в тред на исходное сообщение заказа — видно факт доставки сразу.
+            chat = updated["staff_chat_id"] or resolve_staff_chat_id()
+            txt = f"✅ Заказ #{order_id} доставлен — {actor_name or 'курьер'}, {_batumi_stamp()}"
+            enqueue_notification(chat, txt, reply_to=updated["staff_msg_id"],
+                                 fallback_chat_id=STAFF_CHAT_ID)
+        else:
+            enqueue_notification(resolve_staff_chat_id(), f"Заказ #{order_id}: статус → {label}",
+                                 fallback_chat_id=STAFF_CHAT_ID)
     return dict(updated), None
 
 
