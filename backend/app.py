@@ -423,9 +423,12 @@ def _alert_delivery_failure(failed_chat_id, text):
 def _notify_process_pending():
     """Досылаем висящие уведомления. Вызывается фоновым потоком раз в ~15с."""
     conn = get_db()
+    # Берём только «застрявшие» ≥20с — иначе фоновый досыл может продублировать
+    # сообщение, которое прямо сейчас отправляется немедленной попыткой (особенно
+    # медленный sendPhoto по URL). За 20с немедленная попытка успеет проставить статус.
     rows = conn.execute(
         "SELECT * FROM notifications WHERE status='pending' AND attempts < ? "
-        "ORDER BY id LIMIT 20",
+        "AND created_at <= datetime('now','-20 seconds') ORDER BY id LIMIT 20",
         (NOTIFY_MAX_ATTEMPTS,),
     ).fetchall()
     conn.close()
@@ -616,16 +619,40 @@ def _tg_call(method, payload):
         return False
 
 
-def _edit_message_text(chat_id, message_id, text, entities=None):
-    """Меняем текст ранее отправленного сообщения (и убираем у него кнопки —
-    editMessageText без reply_markup снимает инлайн-клавиатуру). entities —
-    message-entities (чтобы синее упоминание курьера осталось кликабельным)."""
+def _edit_message_text(chat_id, message_id, text, entities=None, reply_markup=None):
+    """Меняем текст ранее отправленного сообщения. Без reply_markup — убирает
+    инлайн-клавиатуру; с ним — ставит новую. entities — message-entities
+    (чтобы синее упоминание курьера осталось кликабельным)."""
     if not chat_id or not message_id:
         return
     payload = {"chat_id": chat_id, "message_id": message_id, "text": text}
     if entities:
         payload["entities"] = json.loads(entities) if isinstance(entities, str) else entities
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
     _tg_call("editMessageText", payload)
+
+
+def _edit_message_caption(chat_id, message_id, caption, entities=None, reply_markup=None):
+    """Меняем подпись у ранее отправленного ФОТО-сообщения (editMessageText для
+    фото не работает). Без reply_markup — убирает инлайн-кнопки."""
+    if not chat_id or not message_id:
+        return
+    payload = {"chat_id": chat_id, "message_id": message_id, "caption": caption}
+    if entities:
+        payload["caption_entities"] = json.loads(entities) if isinstance(entities, str) else entities
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    _tg_call("editMessageCaption", payload)
+
+
+def _edit_message_reply_markup(chat_id, message_id, reply_markup):
+    """Меняем только инлайн-клавиатуру сообщения (напр. «Принять» → «Букет собран»)."""
+    if not chat_id or not message_id:
+        return
+    payload = {"chat_id": chat_id, "message_id": message_id}
+    payload["reply_markup"] = reply_markup or {"inline_keyboard": []}
+    _tg_call("editMessageReplyMarkup", payload)
 
 
 def _answer_callback(cq_id, text=None, alert=False):
@@ -681,8 +708,8 @@ def _bot_send_button(chat_id, text, button_text, url):
 
 
 def _handle_callback(cq):
-    """Обработка нажатий инлайн-кнопок «Принять/Отменить» под заказом. Жать могут
-    только сотрудники owner/florist (сверка telegram_id по таблице staff)."""
+    """Обработка инлайн-кнопок под заказом: «Принять» → «Букет собран» → готово,
+    и «Отменить». Жать могут только owner/florist (сверка telegram_id по staff)."""
     cq_id = cq.get("id")
     data = cq.get("data") or ""
     from_id = str((cq.get("from") or {}).get("id", ""))
@@ -690,7 +717,7 @@ def _handle_callback(cq):
     chat_id = (msg.get("chat") or {}).get("id")
     msg_id = msg.get("message_id")
     action, _, oid = data.partition(":")
-    if action not in ("accept", "cancel") or not oid.isdigit():
+    if action not in ("accept", "cancel", "assembled") or not oid.isdigit():
         return _answer_callback(cq_id)
     order_id = int(oid)
     conn = get_db()
@@ -703,18 +730,26 @@ def _handle_callback(cq):
         return _answer_callback(cq_id, "Заказ не найден", alert=True)
     if action == "accept" and o["status"] != "new":
         return _answer_callback(cq_id, "Заказ уже обработан", alert=True)
+    if action == "assembled" and o["status"] not in ("new", "assembling"):
+        return _answer_callback(cq_id, "Уже собран или закрыт", alert=True)
     if action == "cancel" and o["status"] in ("delivered", "cancelled"):
         return _answer_callback(cq_id, "Заказ уже обработан", alert=True)
-    new_status = "assembling" if action == "accept" else "cancelled"
+    new_status = {"accept": "assembling", "assembled": "assembled", "cancel": "cancelled"}[action]
     updated, err = change_order_status(order_id, new_status, actor_name=staff["name"], notify_staff=False)
     if err:
         return _answer_callback(cq_id, err, alert=True)
-    word = "✅ Принял" if action == "accept" else "✖️ Отменил"
-    extra = f"\n\n{word}: {staff['name']}, {_batumi_stamp()}"
-    if action == "cancel":
-        extra += " · склад возвращён"
-    _edit_message_text(chat_id, msg_id, ((msg.get("text") or "").rstrip()) + extra)
-    _answer_callback(cq_id, "Принято ✓" if action == "accept" else "Отменено ✓")
+    if action == "accept":
+        # Заказ принят → показываем следующую кнопку «Букет собран».
+        _edit_message_reply_markup(chat_id, msg_id, _order_action_markup(order_id, "accepted"))
+        return _answer_callback(cq_id, "Принято ✓")
+    if action == "assembled":
+        # «Собран» дописан в сообщение и кнопки убраны внутри change_order_status.
+        return _answer_callback(cq_id, "Готово ✓")
+    # cancel: дописываем отметку об отмене и убираем кнопки (с учётом фото).
+    text, ents, is_photo = _order_msg_parts(
+        order_id, suffix=f"\n\n✖️ Отменил: {staff['name']}, {_batumi_stamp()} · склад возвращён")
+    _rewrite_order_message(chat_id, msg_id, text, ents, is_photo)
+    _answer_callback(cq_id, "Отменено ✓")
 
 
 def _bot_poll_loop():
@@ -1435,8 +1470,17 @@ def format_order_message(order, items):
     return "\n".join(lines)
 
 
-def _order_action_markup(order_id):
-    """Инлайн-кнопки под уведомлением о новом заказе: приём/отмена прямо из чата."""
+def _order_action_markup(order_id, phase="new"):
+    """Инлайн-кнопки под сообщением заказа. phase:
+      "new"      — «Принять» / «Отменить» (свежий заказ);
+      "accepted" — «Букет собран» (заказ принят, собирается);
+      "done"     — без кнопок (собран/доставлен/отменён)."""
+    if phase == "accepted":
+        return {"inline_keyboard": [[
+            {"text": "📦 Букет собран", "callback_data": f"assembled:{order_id}"},
+        ]]}
+    if phase == "done":
+        return None
     return {"inline_keyboard": [[
         {"text": "✅ Принять", "callback_data": f"accept:{order_id}"},
         {"text": "✖️ Отменить", "callback_data": f"cancel:{order_id}"},
@@ -1500,6 +1544,34 @@ def build_order_message(conn, order_id, ready=False, prefix=""):
     if ready:
         text += "\n\n✅ Собран — готов к выдаче"
     return text, entities
+
+
+def _order_msg_parts(order_id, ready=None, suffix=""):
+    """Открывает conn и возвращает (text, entities, is_photo) для перерисовки
+    сообщения заказа (кнопки/назначение курьера/отмена). ready=None → определяем
+    по статусу (собран и дальше → показываем «Собран»). suffix — приписка."""
+    conn = get_db()
+    try:
+        st = conn.execute("SELECT status FROM orders WHERE id=?", (order_id,)).fetchone()
+        rdy = ready if ready is not None else (st and st["status"] in (
+            "assembled", "out_for_delivery", "delivered"))
+        text, ents = build_order_message(conn, order_id, ready=bool(rdy))
+        is_photo = bool(_order_photo_url(conn, order_id))
+    finally:
+        conn.close()
+    if suffix:
+        text += suffix
+    return text, ents, is_photo
+
+
+def _rewrite_order_message(chat_id, msg_id, text, entities, is_photo, reply_markup=None):
+    """Перерисовать сообщение заказа с учётом того, что оно может быть фото
+    (editMessageCaption) или текст (editMessageText). reply_markup=None убирает
+    кнопки; передан — ставит новые."""
+    if is_photo:
+        _edit_message_caption(chat_id, msg_id, text, entities=entities, reply_markup=reply_markup)
+    else:
+        _edit_message_text(chat_id, msg_id, text, entities=entities, reply_markup=reply_markup)
 
 
 @app.route("/api/orders", methods=["POST"])
@@ -1684,17 +1756,14 @@ def api_create_order():
     # Уведомление в общий чат персонала — через outbox (не потеряется, досылается).
     # fallback = личка владельца: если общий чат настроен с ошибкой, заказ всё равно дойдёт.
     # Корневое сообщение (is_root) — его message_id сохраняется в orders для reply/edit.
+    # ОДНО сообщение: фото товара с подписью-заказом и кнопками (фото прикреплено к заказу).
     staff_chat = resolve_staff_chat_id()
     enqueue_notification(
         staff_chat, order_text,
         reply_markup=_order_action_markup(order_id),
         fallback_chat_id=STAFF_CHAT_ID,
-        order_id=order_id, is_root=True, entities=order_ents,
+        order_id=order_id, is_root=True, entities=order_ents, photo_url=order_photo,
     )
-    # Фото товара — отдельным сообщением сразу под заказом (фото всегда, если есть).
-    if order_photo:
-        enqueue_notification(staff_chat, f"🌸 Заказ #{order_id}",
-                             photo_url=order_photo, fallback_chat_id=STAFF_CHAT_ID)
     return jsonify({"id": order_id, "total": total, "delivery_fee": delivery_fee,
                     "items_total": items_total, "status": "new"}), 201
 
@@ -1934,10 +2003,8 @@ def _finalize_paypal(pp_order_id, amount, currency, raw):
     # Уведомления вне транзакции (через outbox). Корневое сообщение — с сохранением message_id.
     staff_chat = resolve_staff_chat_id()
     enqueue_notification(staff_chat, order_text, reply_markup=_order_action_markup(order_id),
-                         fallback_chat_id=STAFF_CHAT_ID, order_id=order_id, is_root=True, entities=order_ents)
-    if order_photo:
-        enqueue_notification(staff_chat, f"🌸 Заказ #{order_id}",
-                             photo_url=order_photo, fallback_chat_id=STAFF_CHAT_ID)
+                         fallback_chat_id=STAFF_CHAT_ID, order_id=order_id, is_root=True,
+                         entities=order_ents, photo_url=order_photo)
     if order_row and order_row["customer_tg_id"]:
         enqueue_notification(order_row["customer_tg_id"], f"Оплата получена ✅ Заказ #{order_id} принят в работу.")
     return "paid"
@@ -3027,18 +3094,14 @@ def change_order_status(order_id, new_status, actor_name=None, notify_staff=True
     updated = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
     conn.close()
     label = STATUS_LABELS_RU.get(new_status, new_status)
-    if updated["customer_tg_id"]:
-        enqueue_notification(updated["customer_tg_id"], f"Статус заказа #{order_id}: {label}")
+    # Клиенту в ЛС на каждый статус НЕ пишем (владелец просил не засорять личку;
+    # статус клиент и так видит в приложении в «Мои заказы»).
     # «Собран» — дописываем «✅ Собран — готов к выдаче» прямо в сообщение заказа
     # (курьер видит готовность в чате). Упоминание курьера сохраняем кликабельным.
     if new_status == "assembled" and updated["staff_msg_id"]:
-        conn2 = get_db()
-        try:
-            ready_text, ready_ents = build_order_message(conn2, order_id, ready=True)
-        finally:
-            conn2.close()
-        _edit_message_text(updated["staff_chat_id"] or resolve_staff_chat_id(),
-                           updated["staff_msg_id"], ready_text, entities=ready_ents)
+        r_text, r_ents, r_isphoto = _order_msg_parts(order_id, ready=True)
+        _rewrite_order_message(updated["staff_chat_id"] or resolve_staff_chat_id(),
+                               updated["staff_msg_id"], r_text, r_ents, r_isphoto)
     if notify_staff:
         if new_status == "delivered":
             # Ответом в тред на исходное сообщение заказа — видно факт доставки сразу.
@@ -3320,6 +3383,15 @@ def api_admin_order_assign(order_id):
         advanced, _err = change_order_status(order_id, "out_for_delivery", actor_name=g.staff.get("name"))
         if advanced is not None:
             updated = advanced
+    # Обновляем сообщение заказа в чате: показываем назначенного курьера синим
+    # именем прямо в заказе (или убираем, если сняли). Кнопки сохраняем по статусу.
+    if updated["staff_msg_id"]:
+        _st = updated["status"]
+        _phase = "new" if _st == "new" else ("accepted" if _st == "assembling" else "done")
+        m_text, m_ents, m_isphoto = _order_msg_parts(order_id)
+        _rewrite_order_message(updated["staff_chat_id"] or resolve_staff_chat_id(),
+                               updated["staff_msg_id"], m_text, m_ents, m_isphoto,
+                               reply_markup=_order_action_markup(order_id, _phase))
     return jsonify(dict(updated))
 
 

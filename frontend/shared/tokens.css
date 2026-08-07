@@ -201,6 +201,9 @@ h1, h2, h3, .display {
   border-radius: var(--radius-l) var(--radius-l) 0 0;
   max-height: 88vh;
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;   /* инерционный скролл на iOS */
+  overscroll-behavior: contain;         /* прокрутка не «протекает» на фон */
+  touch-action: pan-y;                  /* внутри листа — вертикальный скролл, без протекания жестов */
   z-index: 41;
   transform: translateY(100%);
   transition: transform 0.25s cubic-bezier(.32,.72,0,1);
@@ -208,6 +211,10 @@ h1, h2, h3, .display {
   box-shadow: var(--shadow);
 }
 .sheet.open { transform: translateY(0); }
+/* Когда открыта любая шторка — фон под ней не должен прокручиваться (иначе палец
+   «проходит сквозь» лист и двигает каталог за ним). */
+body.sheet-open { overflow: hidden; height: 100%; }
+body.sheet-open .app { overflow: hidden; }
 .sheet-handle { width: 40px; height: 4px; background: var(--border); border-radius: 4px; margin: 6px auto 14px; }
 
 /* --- нижняя плавающая панель корзины --- */

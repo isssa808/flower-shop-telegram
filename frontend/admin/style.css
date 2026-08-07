@@ -93,8 +93,10 @@
 .ready-go { background: var(--green-soft); color: var(--petrol); }
 
 .status-select {
-  font-size: 12px; font-weight: 700; padding: 6px 10px; border-radius: 8px;
+  display: block; width: 100%; box-sizing: border-box; margin-top: 8px;
+  font-size: 13px; font-weight: 700; padding: 10px 12px; border-radius: 10px;
   border: 1.5px solid var(--border); background: var(--surface); color: var(--ink);
+  -webkit-appearance: none; appearance: none;
 }
 
 /* --- каталог --- */

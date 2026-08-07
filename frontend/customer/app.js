@@ -72,6 +72,9 @@ function hideSheetEl(name) {
 function syncBackButton() {
   if (sheetHistory.length) tg.BackButton?.show?.();
   else tg.BackButton?.hide?.();
+  // Лочим прокрутку фона, пока открыта хоть одна шторка — иначе жест «проходит
+  // сквозь» лист и двигает каталог за ним.
+  document.body.classList.toggle("sheet-open", sheetHistory.length > 0);
 }
 function navPush(name) {
   blurActive();
