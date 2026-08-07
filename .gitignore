@@ -4,3 +4,4 @@ __pycache__/
 *.db
 .env
 frontend/img/uploads/
+SESSION_NOTES.md
