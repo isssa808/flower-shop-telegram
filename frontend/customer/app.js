@@ -618,7 +618,25 @@ async function loadSlots() {
   updateCheckoutState();
 }
 
+// Разрешение боту писать пользователю. Без него бот не сможет присылать статусы
+// заказа и рассылки тем, кто зашёл по прямой ссылке на Mini App и не запускал
+// бота (Telegram отклоняет такие сообщения). Спрашиваем один раз — в момент
+// оформления заказа, где разрешение выглядит логично, и заранее (до отправки),
+// чтобы к моменту заказа доступ уже был выдан. Если уже разрешено
+// (allows_write_to_pm) или клиент старый — тихо пропускаем.
+let writeAccessAsked = false;
+function ensureWriteAccess() {
+  if (writeAccessAsked) return;
+  const u = tg.initDataUnsafe && tg.initDataUnsafe.user;
+  if (u && u.allows_write_to_pm) return;
+  if (!(tg.isVersionAtLeast && tg.isVersionAtLeast("6.9"))) return;
+  if (typeof tg.requestWriteAccess !== "function") return;
+  writeAccessAsked = true;
+  try { tg.requestWriteAccess(); } catch (e) {}
+}
+
 function openCheckout() {
+  ensureWriteAccess();
   state.fulfillment = "delivery";
   state.zone = "batumi";
   const dateEl = el("f-date");
