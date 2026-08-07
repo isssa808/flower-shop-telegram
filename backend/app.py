@@ -410,14 +410,14 @@ def notify_telegram(chat_id, text):
 
 
 def _alert_delivery_failure(failed_chat_id, text):
-    """Если уведомление клиенту/курьеру так и не доставилось (permanent) —
-    предупреждаем владельца в личку, чтобы связались вручную. Защита от петли:
-    не алертим о неудаче доставки в сам чат владельца/персонала."""
-    owner = STAFF_CHAT_ID
-    if not owner or str(failed_chat_id) == str(owner) or str(failed_chat_id) == str(resolve_staff_chat_id()):
+    """Если уведомление так и не доставилось (permanent) — предупреждаем в ОБЩЕМ
+    чате (не в ЛС), чтобы связались вручную. Защита от петли: не алертим о неудаче
+    доставки в сам общий чат."""
+    target = resolve_staff_chat_id()
+    if not target or str(failed_chat_id) == str(target):
         return
     first = (text or "").split("\n", 1)[0]
-    enqueue_notification(owner, f"⚠️ Не смог доставить уведомление (чат {failed_chat_id}): {first}. Свяжитесь вручную.")
+    enqueue_notification(target, f"⚠️ Не смог доставить уведомление (чат {failed_chat_id}): {first}. Свяжитесь вручную.")
 
 
 def _notify_process_pending():
@@ -557,11 +557,8 @@ def _reminders_sweep():
         diff = start - now_min
         if 0 <= diff <= SLOT_REMIND_MINUTES:
             text = f"🚚 Через ~{diff} мин доставка заказа #{r['id']} ({r['delivery_slot']})."
+            # Только в общий чат; курьеру в ЛС отдельно НЕ дублируем (не засорять личку).
             enqueue_notification(resolve_staff_chat_id(), text, fallback_chat_id=STAFF_CHAT_ID)
-            if r["assigned_staff_id"]:
-                c = _staff_telegram_id(r["assigned_staff_id"])
-                if c:
-                    enqueue_notification(c, text)
             _mark_order_flag(r["id"], "slot_reminded")
 
 
@@ -1983,9 +1980,9 @@ def _finalize_paypal(pp_order_id, amount, currency, raw):
                      (rawj, _batumi_stamp(), pay["id"]))
         conn.commit()
         conn.close()
-        if STAFF_CHAT_ID:
-            enqueue_notification(STAFF_CHAT_ID,
-                                 f"⚠️ Оплата заказа #{pay['order_id']} пришла на неверную сумму/валюту — проверьте вручную.")
+        enqueue_notification(resolve_staff_chat_id(),
+                             f"⚠️ Оплата заказа #{pay['order_id']} пришла на неверную сумму/валюту — проверьте вручную.",
+                             fallback_chat_id=STAFF_CHAT_ID)
         return "wrong_amount"
     order_id = pay["order_id"]
     conn.execute("UPDATE payments SET status='paid', raw_payload=?, updated_at=? WHERE id=?",
@@ -3093,25 +3090,22 @@ def change_order_status(order_id, new_status, actor_name=None, notify_staff=True
     conn.commit()
     updated = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
     conn.close()
-    label = STATUS_LABELS_RU.get(new_status, new_status)
-    # Клиенту в ЛС на каждый статус НЕ пишем (владелец просил не засорять личку;
-    # статус клиент и так видит в приложении в «Мои заказы»).
-    # «Собран» — дописываем «✅ Собран — готов к выдаче» прямо в сообщение заказа
-    # (курьер видит готовность в чате). Упоминание курьера сохраняем кликабельным.
+    # Ни клиенту, ни сотрудникам отдельных сообщений на каждый статус НЕ шлём —
+    # это была каша. Весь путь заказа виден в ОДНОМ сообщении в чате:
+    #   принят (кнопка «Букет собран») → «✅ Собран — готов к выдаче» (правкой) →
+    #   ответ «✅ Доставлен». Клиент видит статус в приложении («Мои заказы»).
+    # «Собран» — дописываем прямо в сообщение заказа (правкой), упоминание курьера
+    # сохраняем кликабельным.
     if new_status == "assembled" and updated["staff_msg_id"]:
         r_text, r_ents, r_isphoto = _order_msg_parts(order_id, ready=True)
         _rewrite_order_message(updated["staff_chat_id"] or resolve_staff_chat_id(),
                                updated["staff_msg_id"], r_text, r_ents, r_isphoto)
-    if notify_staff:
-        if new_status == "delivered":
-            # Ответом в тред на исходное сообщение заказа — видно факт доставки сразу.
-            chat = updated["staff_chat_id"] or resolve_staff_chat_id()
-            txt = f"✅ Заказ #{order_id} доставлен — {actor_name or 'курьер'}, {_batumi_stamp()}"
-            enqueue_notification(chat, txt, reply_to=updated["staff_msg_id"],
-                                 fallback_chat_id=STAFF_CHAT_ID)
-        else:
-            enqueue_notification(resolve_staff_chat_id(), f"Заказ #{order_id}: статус → {label}",
-                                 fallback_chat_id=STAFF_CHAT_ID)
+    # «Доставлен» — единственный статус, о котором пишем: ответом в тред на заказ.
+    if notify_staff and new_status == "delivered":
+        chat = updated["staff_chat_id"] or resolve_staff_chat_id()
+        txt = f"✅ Заказ #{order_id} доставлен — {actor_name or 'курьер'}, {_batumi_stamp()}"
+        enqueue_notification(chat, txt, reply_to=updated["staff_msg_id"],
+                             fallback_chat_id=STAFF_CHAT_ID)
     return dict(updated), None
 
 
@@ -3366,17 +3360,9 @@ def api_admin_order_assign(order_id):
     conn.commit()
     updated = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
     conn.close()
-    # Уведомляем назначенного курьера в личку (он узнаёт о доставке через Telegram).
-    if courier:
-        addr = order["address"] or "—"
-        when = " ".join(x for x in [order["delivery_date"] or "", order["delivery_slot"] or ""] if x)
-        enqueue_notification(
-            courier["telegram_id"],
-            f"🛵 Вам назначена доставка заказа #{order_id}\n"
-            f"Адрес: {addr}\nКогда: {when or '—'}\n"
-            f"Получатель: {order['recipient_name'] or order['customer_name'] or '—'}\n"
-            f"Телефон: {order['recipient_phone'] or order['customer_phone'] or '—'}",
-        )
+    # Курьеру в личку НЕ пишем (владелец: не засорять ЛС сотрудников). Курьер видит
+    # заказ в общем чате (отмечен синим именем) и у себя в приложении. Пинг курьеру
+    # приходит, если он назначен «Основным» — тогда упоминание в первом сообщении.
     # Связка курьер↔статус: если заказ уже собран, назначение курьера = передача
     # на доставку → авто-статус «Передан курьеру» (чтобы не ставить руками дважды).
     if courier and order["status"] == "assembled":
