@@ -621,17 +621,6 @@ async function loadSlots() {
 function openCheckout() {
   state.fulfillment = "delivery";
   state.zone = "batumi";
-  // Кнопка онлайн-оплаты (PayPal) — только если владелец её включил и задал курс.
-  const ppBtn = el("pay-paypal-btn");
-  if (ppBtn) {
-    const on = !!(state.shop && state.shop.paypal_enabled);
-    ppBtn.hidden = !on;
-    if (!on && state.paymentMethod === "paypal") {
-      state.paymentMethod = "cash";
-      document.querySelectorAll("#payment-toggle .segmented-btn").forEach((b) =>
-        b.classList.toggle("active", b.dataset.value === "cash"));
-    }
-  }
   const dateEl = el("f-date");
   if (dateEl) {
     dateEl.min = batumiToday();
@@ -651,6 +640,24 @@ function syncFulfillmentUi() {
     b.classList.toggle("active", b.dataset.value === state.zone)
   );
   el("delivery-fields").style.display = state.fulfillment === "delivery" ? "block" : "none";
+  syncPaymentMethods();
+}
+
+// Способы оплаты зависят от типа выполнения (правило владельца):
+//  • Доставка → только безнал: Перевод (+ Картой онлайн, если включён PayPal).
+//    Курьер денег не берёт, оплата предоплатой — наличных при доставке нет.
+//  • Самовывоз → Наличные, Картой в магазине (терминал), Перевод (+ онлайн).
+// Прячем неподходящие кнопки; если текущий метод стал недоступен — выбираем
+// первый доступный.
+function syncPaymentMethods() {
+  const isDelivery = state.fulfillment === "delivery";
+  const paypalOn = !!(state.shop && state.shop.paypal_enabled);
+  const allow = isDelivery ? ["transfer"] : ["cash", "card_store", "transfer"];
+  if (paypalOn) allow.push("paypal");
+  const btns = [...document.querySelectorAll("#payment-toggle .segmented-btn")];
+  btns.forEach((b) => { b.hidden = !allow.includes(b.dataset.value); });
+  if (!allow.includes(state.paymentMethod)) state.paymentMethod = allow[0];
+  btns.forEach((b) => b.classList.toggle("active", b.dataset.value === state.paymentMethod));
 }
 
 // Пересчёт подсказок, доступности и сумм на экране оформления.

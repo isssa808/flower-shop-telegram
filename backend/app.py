@@ -1364,8 +1364,8 @@ def format_order_message(order, items):
         lines.append(f"Получатель: {rn}{(', ' + rp) if rp else ''}".strip())
     if order.get("card_message"):
         lines.append(f"Открытка: {order['card_message']}")
-    pay = {"cash": "наличные", "card_courier": "карта курьеру", "transfer": "перевод",
-           "paypal": "PayPal (онлайн)"}.get(
+    pay = {"cash": "наличные", "card_courier": "карта курьеру", "card_store": "картой в магазине",
+           "transfer": "перевод", "paypal": "PayPal (онлайн)"}.get(
         order.get("payment_method"), order.get("payment_method") or "—")
     lines.append(f"Оплата: {pay}")
     return "\n".join(lines)

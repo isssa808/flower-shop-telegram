@@ -1353,7 +1353,7 @@ function renderSalesTabs() {
   );
 }
 
-const PAY_LABELS = { cash: "нал", card: "карта", transfer: "перевод" };
+const PAY_LABELS = { cash: "нал", card: "карта", card_store: "карта в магазине", card_courier: "карта курьеру", transfer: "перевод", paypal: "PayPal" };
 const RU_MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля",
   "августа", "сентября", "октября", "ноября", "декабря"];
 function fmtDayRu(day) {
