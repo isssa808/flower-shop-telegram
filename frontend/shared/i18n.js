@@ -103,7 +103,7 @@ const STRINGS = {
     acc_description: "Описание продукта",
     acc_composition: "Состав букета",
     acc_delivery: "Доставка и оплата",
-    delivery_info_default: "Доставка по Батуми при заказе от 100 ₾: 15 ₾ до 22:00, 30 ₾ с 22:00 до 00:00. За пределы Батуми — по договорённости, напишите нам напрямую. Оплата: наличными, картой курьеру или переводом.",
+    delivery_info_default: "Доставка по Батуми при заказе от 100 ₾: 15 ₾ до 22:00, 30 ₾ с 22:00 до 00:00. За пределы Батуми — по договорённости, напишите нам напрямую. Оплата: наличными или переводом.",
     addons_title: "Дополнения к букету",
     addons_cart_title: "Добавьте к заказу",
 
@@ -269,7 +269,7 @@ const STRINGS = {
     acc_description: "Product description",
     acc_composition: "Bouquet composition",
     acc_delivery: "Delivery and payment",
-    delivery_info_default: "Delivery in Batumi for orders from 100 ₾: 15 ₾ before 22:00, 30 ₾ from 22:00 to 00:00. Outside Batumi — by arrangement, message us directly. Payment: cash, card to courier, or bank transfer.",
+    delivery_info_default: "Delivery in Batumi for orders from 100 ₾: 15 ₾ before 22:00, 30 ₾ from 22:00 to 00:00. Outside Batumi — by arrangement, message us directly. Payment: cash or bank transfer.",
     addons_title: "Add to your bouquet",
     addons_cart_title: "Add to your order",
 
