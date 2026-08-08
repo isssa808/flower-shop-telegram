@@ -3622,6 +3622,86 @@ def api_admin_reports():
     })
 
 
+def _send_document(chat_id, filename, content_bytes, caption=""):
+    """Отправка файла в чат Telegram (sendDocument, multipart на stdlib)."""
+    if not chat_id or BOT_TOKEN == "LOCAL_DEV_TOKEN":
+        app.logger.info(f"[export skip] {filename} to={chat_id}")
+        return False
+    boundary = "----flowers" + os.urandom(8).hex()
+    out = []
+    def _field(name, value):
+        out.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
+    _field("chat_id", str(chat_id))
+    if caption:
+        _field("caption", caption)
+    out.append((f'--{boundary}\r\nContent-Disposition: form-data; name="document"; '
+                f'filename="{filename}"\r\nContent-Type: text/csv; charset=utf-8\r\n\r\n').encode())
+    out.append(content_bytes)
+    out.append(f'\r\n--{boundary}--\r\n'.encode())
+    body = b"".join(out)
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument", data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return json.loads(resp.read()).get("ok", False)
+    except Exception as e:
+        app.logger.warning(f"[export] sendDocument failed: {e}")
+        return False
+
+
+@app.route("/api/admin/export")
+@require_owner
+def api_admin_export():
+    """Выгрузка кассы за период в CSV — присылается файлом в чат владельца с ботом
+    (в Telegram Mini App скачивание файла ненадёжно, поэтому шлём документом)."""
+    import csv
+    import io
+    period = request.args.get("period", "day")
+    prefix = _period_prefix(period)
+    pay_ru = {"cash": "нал", "card": "карта", "transfer": "перевод", "card_store": "карта в магазине",
+              "card_courier": "карта курьеру", "paypal": "PayPal"}
+    exp_ru = {"flowers": "закупка", "courier": "курьер", "salary": "зарплата", "rent": "аренда", "other": "прочее"}
+    conn = get_db()
+    buf = io.StringIO()
+    buf.write("﻿")  # BOM — чтобы Excel правильно открыл кириллицу
+    w = csv.writer(buf, delimiter=";")
+    w.writerow(["Тип", "Дата/время", "Наименование", "Кол-во", "Сумма ₾", "Оплата", "Кто/категория"])
+    for o in conn.execute(
+        "SELECT id, total, payment_method, created_at FROM orders WHERE status='delivered' "
+        "AND datetime(created_at,'+4 hours') LIKE ? ORDER BY created_at", (prefix + "%",),
+    ).fetchall():
+        items = conn.execute(
+            "SELECT product_name, variant_label, quantity FROM order_items WHERE order_id=?", (o["id"],)
+        ).fetchall()
+        title = ", ".join(
+            f"{it['product_name']}{(' (' + it['variant_label'] + ')') if it['variant_label'] else ''}×{it['quantity']}"
+            for it in items)
+        qty = sum(it["quantity"] or 0 for it in items)
+        bt = conn.execute("SELECT datetime(?, '+4 hours') d", (o["created_at"],)).fetchone()["d"]
+        w.writerow([f"Доставка #{o['id']}", bt, title, qty, int(o["total"] or 0),
+                    pay_ru.get(o["payment_method"], o["payment_method"] or ""), ""])
+    for s in conn.execute(
+        "SELECT * FROM sales WHERE COALESCE(created_at,'') LIKE ? ORDER BY created_at", (prefix + "%",)
+    ).fetchall():
+        typ = "Возврат" if (s["amount"] or 0) < 0 else "Продажа"
+        ttl = f"{s['title']}{(' (' + s['variant_label'] + ')') if s['variant_label'] else ''}"
+        w.writerow([typ, s["created_at"], ttl, s["quantity"] or 1, int(s["amount"] or 0),
+                    pay_ru.get(s["payment_method"], s["payment_method"] or ""), s["sold_by"] or ""])
+    for x in conn.execute(
+        "SELECT * FROM expenses WHERE COALESCE(created_at,'') LIKE ? ORDER BY created_at", (prefix + "%",)
+    ).fetchall():
+        w.writerow(["Расход", x["created_at"], x["comment"] or "", "", -int(x["amount"] or 0),
+                    pay_ru.get(x["payment_method"], x["payment_method"] or ""), exp_ru.get(x["category"], x["category"] or "")])
+    conn.close()
+    fname = f"kassa_{prefix}.csv"
+    ok = _send_document(g.staff.get("telegram_id"), fname, buf.getvalue().encode("utf-8"),
+                        caption=f"Касса за {'месяц' if period == 'month' else 'день'} ({prefix})")
+    if not ok:
+        return jsonify({"error": "send failed", "detail": "Не удалось отправить файл. Напишите боту /start и повторите."}), 502
+    return jsonify({"ok": True})
+
+
 @app.route("/api/admin/sales", methods=["GET", "POST"])
 @require_staff
 def api_admin_sales():

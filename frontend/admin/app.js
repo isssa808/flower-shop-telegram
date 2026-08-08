@@ -1580,9 +1580,19 @@ async function openReports(period) {
     <div class="intake-hint">${r.tx_count} операций · ${r.orders_count} доставок · ${r.sales_count} в точке${r.has_cost ? "" : " · впишите цены закупки для прибыли"}</div>
     <div class="shift-sec">Топ товаров</div>${topStr}
     <div class="shift-sec">По оплате</div>${payStr}
-    <div class="shift-sec">Продажи по сотрудникам</div>${staffStr}`;
+    <div class="shift-sec">Продажи по сотрудникам</div>${staffStr}
+    <button class="btn btn-secondary btn-block" id="export-btn" style="margin-top:18px;">⬇ Выгрузить в Excel (в чат с ботом)</button>`;
   el("sale-edit-content").querySelectorAll("[data-rp]").forEach((b) =>
     b.addEventListener("click", () => openReports(b.dataset.rp)));
+  el("export-btn").addEventListener("click", async () => {
+    const b = el("export-btn");
+    b.disabled = true; b.textContent = "Отправляю…";
+    try {
+      await apiFetch(`/api/admin/export?period=${period}`, { tg });
+      showToast("Файл отправлен в чат с ботом");
+    } catch (err) { showToast(err?.data?.detail || "Не удалось выгрузить"); }
+    b.disabled = false; b.textContent = "⬇ Выгрузить в Excel (в чат с ботом)";
+  });
 }
 
 async function openShiftHistory() {
