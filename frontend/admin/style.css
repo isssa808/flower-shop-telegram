@@ -88,11 +88,14 @@
 .shift-btn { flex: none; font: inherit; font-size: 12.5px; font-weight: 700; padding: 8px 13px; border-radius: 10px;
   border: 1.5px solid var(--border); background: var(--surface-2); color: var(--ink); cursor: pointer; }
 .shift-open .shift-btn { border-color: #2E8B57; color: #2E8B57; }
-.cash-metrics { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+.cash-metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
 .cm-card { background: var(--surface); border-radius: var(--radius-s); padding: 9px 10px; }
 .cm-lbl { font-size: 11.5px; color: var(--ink-muted); }
 .cm-val { font-size: 15.5px; font-weight: 800; margin-top: 2px; letter-spacing: -0.02em; }
 .cm-val.cm-red { color: var(--danger); }
+.cm-val.cm-green { color: #2E8B57; }
+.cm-val.cm-mut { color: var(--ink-muted); }
+.cm-sub { font-size: 11px; font-weight: 700; color: var(--ink-muted); }
 .ev-badge.ev-exp { background: #f8e7e5; color: #a5342f; }
 .exp-amt { color: var(--danger); }
 .seg-wrap { flex-wrap: wrap; }

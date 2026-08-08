@@ -115,6 +115,7 @@ def bootstrap():
     _add_column_if_missing(conn, "flower_stock", "flower_type", "TEXT")
     _add_column_if_missing(conn, "flower_stock", "pack_size", "REAL NOT NULL DEFAULT 0")
     _add_column_if_missing(conn, "flower_stock", "photo_url", "TEXT")
+    _add_column_if_missing(conn, "flower_stock", "cost", "REAL NOT NULL DEFAULT 0")  # закуп. цена ₾/шт (для прибыли)
     _add_column_if_missing(conn, "order_items", "variant_id", "INTEGER")
     # Штучные товары (шары/вазы/сладости): свой остаток вместо рецепта из цветов.
     _add_column_if_missing(conn, "products", "track_stock", "INTEGER NOT NULL DEFAULT 0")
@@ -2363,13 +2364,13 @@ def api_admin_stock():
     if request.method == "POST":
         body = request.get_json(force=True)
         cur = conn.execute(
-            "INSERT INTO flower_stock (location_id, name, flower_type, unit, quantity, low_stock_threshold, supplier, pack_size) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO flower_stock (location_id, name, flower_type, unit, quantity, low_stock_threshold, supplier, pack_size, cost) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 body["location_id"], body["name"], body.get("flower_type", ""),
                 body.get("unit", "шт"), body.get("quantity", 0),
                 body.get("low_stock_threshold", 10), body.get("supplier", ""),
-                body.get("pack_size", 0),
+                body.get("pack_size", 0), float(body.get("cost") or 0),
             ),
         )
         stock_id = cur.lastrowid
@@ -2543,7 +2544,7 @@ def api_admin_stock_edit(stock_id):
     for k in ("name", "flower_type", "unit", "supplier"):
         if k in body:
             fields[k] = body[k]
-    for k in ("low_stock_threshold", "pack_size"):
+    for k in ("low_stock_threshold", "pack_size", "cost"):
         if k in body:
             fields[k] = float(body[k])
     if fields:
@@ -2600,6 +2601,12 @@ def api_admin_stock_intake():
             (stock_id, stems, it.get("note") or "приёмка"),
         )
         _batch_add(conn, stock_id, stems)  # новая партия для плашки свежести
+        try:
+            _c = float(it.get("cost") or 0)
+            if _c > 0:
+                conn.execute("UPDATE flower_stock SET cost=? WHERE id=?", (_c, stock_id))  # текущая закуп. цена
+        except (TypeError, ValueError):
+            pass
         applied.append({"flower_id": stock_id, "added": stems})
     conn.commit()
     conn.close()
@@ -3465,6 +3472,77 @@ def api_cash_shift_detail(shift_id):
         "sales": [dict(s) for s in sales],
         "expenses": [dict(e) for e in expenses],
     })
+
+
+def _flower_cost(conn, flower_id):
+    r = conn.execute("SELECT cost FROM flower_stock WHERE id=?", (flower_id,)).fetchone()
+    return (r["cost"] or 0) if r else 0
+
+
+def _group_cost(conn, flower_type):
+    """Средняя закуп. цена по группе (для строк рецепта-замены «из группы Розы»)."""
+    r = conn.execute(
+        "SELECT AVG(cost) a FROM flower_stock WHERE flower_type=? AND cost>0",
+        ((flower_type or "").strip(),),
+    ).fetchone()
+    return r["a"] or 0
+
+
+def _variant_cost(conn, product_id, variant_id):
+    """Себестоимость 1 шт букета = Σ(рецепт × закуп. цена цветка). Строка-группа —
+    по средней цене группы. Нет рецепта/цены → 0 (прибыль тогда покажется как «—»)."""
+    cost = 0.0
+    for ln in _recipe_lines_for(conn, product_id, variant_id):
+        qn = ln["quantity_needed"] or 0
+        if ln["flower_stock_id"]:
+            cost += qn * _flower_cost(conn, ln["flower_stock_id"])
+        elif ln["flower_type"]:
+            cost += qn * _group_cost(conn, ln["flower_type"])
+    return cost
+
+
+@app.route("/api/admin/cash/cogs")
+@require_staff
+def api_cash_cogs():
+    """Себестоимость (COGS) проданного за период — для карточки «Прибыль». Считается
+    ТОЛЬКО на сервере (себестоимость наружу не отдаём). has_cost=false → на фронте
+    прибыль показываем «—» (цены закупки ещё не заданы)."""
+    if g.staff.get("role") == "courier":
+        return jsonify({"error": "forbidden"}), 403
+    period = request.args.get("period", "day")
+    n = _batumi_now()
+    prefix = (f"{n.tm_year:04d}-{n.tm_mon:02d}" if period == "month"
+              else f"{n.tm_year:04d}-{n.tm_mon:02d}-{n.tm_mday:02d}")
+    conn = get_db()
+    has_cost = conn.execute("SELECT 1 FROM flower_stock WHERE cost>0 LIMIT 1").fetchone() is not None
+    cogs = 0.0
+    # Доставки (по дате заказа Батуми) — по позициям заказа.
+    for o in conn.execute(
+        "SELECT id FROM orders WHERE status='delivered' AND datetime(created_at,'+4 hours') LIKE ?",
+        (prefix + "%",),
+    ).fetchall():
+        for it in conn.execute(
+            "SELECT product_id, variant_id, quantity FROM order_items WHERE order_id=?", (o["id"],)
+        ).fetchall():
+            if it["product_id"]:
+                cogs += _variant_cost(conn, it["product_id"], it["variant_id"]) * (it["quantity"] or 1)
+    # Продажи в точке — variant_id ищем по product_id+label (в sales хранится label).
+    for s in conn.execute(
+        "SELECT product_id, variant_label, quantity FROM sales WHERE COALESCE(created_at,'') LIKE ?",
+        (prefix + "%",),
+    ).fetchall():
+        if not s["product_id"]:
+            continue
+        vid = None
+        if s["variant_label"]:
+            vr = conn.execute(
+                "SELECT id FROM product_variants WHERE product_id=? AND label=?",
+                (s["product_id"], s["variant_label"]),
+            ).fetchone()
+            vid = vr["id"] if vr else None
+        cogs += _variant_cost(conn, s["product_id"], vid) * (s["quantity"] or 1)
+    conn.close()
+    return jsonify({"cogs": cogs, "has_cost": has_cost})
 
 
 @app.route("/api/admin/sales", methods=["GET", "POST"])

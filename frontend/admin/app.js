@@ -845,7 +845,10 @@ function openStockItem(id) {
         <div class="field"><label>Штук в пачке</label><input name="pack_size" type="number" step="1" min="0" value="${v("pack_size", 0)}"/></div>
         <div class="field"><label>Порог «мало»</label><input name="low_stock_threshold" type="number" step="1" min="0" value="${v("low_stock_threshold", 10)}"/></div>
       </div>
-      <div class="field"><label>Поставщик</label><input name="supplier" value="${_q(v("supplier"))}"/></div>
+      <div class="field-row">
+        <div class="field"><label>Поставщик</label><input name="supplier" value="${_q(v("supplier"))}"/></div>
+        <div class="field"><label>Закуп. цена, ₾/шт</label><input name="cost" type="number" step="0.01" min="0" value="${v("cost", 0)}"/></div>
+      </div>
       ${!s ? `<div class="field"><label>Начальный остаток (шт)</label><input name="quantity" type="number" step="1" value="0"/></div>` : ""}
       <div class="form-actions">
         <button type="button" class="btn btn-secondary" data-close="stock-action">Отмена</button>
@@ -876,6 +879,7 @@ function openStockItem(id) {
       pack_size: parseFloat(fd.get("pack_size")) || 0,
       low_stock_threshold: parseFloat(fd.get("low_stock_threshold")) || 0,
       supplier: fd.get("supplier") || "",
+      cost: parseFloat(fd.get("cost")) || 0,
     };
     try {
       let saved;
@@ -1398,13 +1402,14 @@ async function renderSales() {
   const listWrap = el("sales-list");
   const totalWrap = el("sales-total");
   const panel = el("cash-panel");
-  let orders = [], sales = [], expenses = [], cash = { shift: null };
+  let orders = [], sales = [], expenses = [], cash = { shift: null }, cogsData = { cogs: 0, has_cost: false };
   try {
-    [orders, sales, expenses, cash] = await Promise.all([
+    [orders, sales, expenses, cash, cogsData] = await Promise.all([
       apiFetch(`/api/admin/orders?status=delivered&location_id=${LOCATION_ID}`, { tg }),
       apiFetch(`/api/admin/sales?period=${state.salesPeriod}`, { tg }),
       apiFetch(`/api/admin/expenses?period=${state.salesPeriod}`, { tg }),
       apiFetch(`/api/admin/cash/current?location_id=${LOCATION_ID}`, { tg }).catch(() => ({ shift: null })),
+      apiFetch(`/api/admin/cash/cogs?period=${state.salesPeriod}`, { tg }).catch(() => ({ cogs: 0, has_cost: false })),
     ]);
   } catch {
     listWrap.innerHTML = `<div class="empty-state">Не удалось загрузить кассу</div>`;
@@ -1444,7 +1449,8 @@ async function renderSales() {
   const revenue = events.filter((e) => e.kind !== "expense").reduce((s, e) => s + e.amount, 0);
   const expTotal = expenses.reduce((s, x) => s + (x.amount || 0), 0);
   const cashInDrawer = (cash && cash.shift) ? cash.expected_cash : null;
-  renderCashPanel(panel, cash, period, revenue, expTotal, cashInDrawer);
+  const profit = cogsData && cogsData.has_cost ? (revenue - (cogsData.cogs || 0)) : null;
+  renderCashPanel(panel, cash, period, revenue, expTotal, cashInDrawer, profit);
 
   if (!events.length) {
     listWrap.innerHTML = `<div class="empty-state">За ${period === "month" ? "месяц" : "день"} операций нет</div>`;
@@ -1495,7 +1501,7 @@ async function renderSales() {
 }
 
 // Плашка смены + карточки-метрики над журналом кассы.
-function renderCashPanel(panel, cash, period, revenue, expTotal, cashInDrawer) {
+function renderCashPanel(panel, cash, period, revenue, expTotal, cashInDrawer, profit) {
   if (!panel) return;
   const sh = cash && cash.shift;
   const bar = sh
@@ -1506,12 +1512,19 @@ function renderCashPanel(panel, cash, period, revenue, expTotal, cashInDrawer) {
     : `<div class="shift-bar">
          <div><div class="shift-title">Смена закрыта</div><div class="shift-sub">откройте, чтобы вести кассу за день</div></div>
          <button class="shift-btn" id="shift-open-btn">Открыть</button></div>`;
-  const thirdLabel = period === "month" ? "Итого" : "Нал в кассе";
-  const thirdVal = period === "month" ? money(revenue - expTotal) : (cashInDrawer != null ? money(cashInDrawer) : "—");
+  const fourthLabel = period === "month" ? "Итого" : "Нал в кассе";
+  const fourthVal = period === "month" ? money(revenue - expTotal) : (cashInDrawer != null ? money(cashInDrawer) : "—");
+  let profitCell;
+  if (profit == null) profitCell = `<div class="cm-val cm-mut">—</div>`;
+  else {
+    const marg = revenue > 0 ? Math.round((profit / revenue) * 100) : 0;
+    profitCell = `<div class="cm-val cm-green">${money(profit)} <span class="cm-sub">· ${marg}%</span></div>`;
+  }
   const metrics = `<div class="cash-metrics">
       <div class="cm-card"><div class="cm-lbl">Выручка</div><div class="cm-val">${money(revenue)}</div></div>
+      <div class="cm-card"><div class="cm-lbl">Прибыль</div>${profitCell}</div>
       <div class="cm-card"><div class="cm-lbl">Расходы</div><div class="cm-val cm-red">${money(expTotal)}</div></div>
-      <div class="cm-card"><div class="cm-lbl">${thirdLabel}</div><div class="cm-val">${thirdVal}</div></div>
+      <div class="cm-card"><div class="cm-lbl">${fourthLabel}</div><div class="cm-val">${fourthVal}</div></div>
     </div>`;
   panel.innerHTML = bar + metrics + `<button class="cash-link" id="shift-history-btn">История смен ›</button>`;
   el("shift-open-btn")?.addEventListener("click", () => openShiftForm("open"));
