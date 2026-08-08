@@ -1528,10 +1528,55 @@ function renderCashPanel(panel, cash, period, revenue, expTotal, cashInDrawer, p
       <div class="cm-card"><div class="cm-lbl">Расходы</div><div class="cm-val cm-red">${money(expTotal)}</div></div>
       <div class="cm-card"><div class="cm-lbl">${fourthLabel}</div><div class="cm-val">${fourthVal}</div></div>
     </div>`;
-  panel.innerHTML = bar + metrics + `<button class="cash-link" id="shift-history-btn">История смен ›</button>`;
+  const links = `<div class="cash-links">
+      <button class="cash-link" id="shift-history-btn">История смен ›</button>
+      ${isOwner() ? `<button class="cash-link" id="reports-btn">Отчёты ›</button>` : ""}
+    </div>`;
+  panel.innerHTML = bar + metrics + links;
   el("shift-open-btn")?.addEventListener("click", () => openShiftForm("open"));
   el("shift-close-btn")?.addEventListener("click", () => openShiftForm("close"));
   el("shift-history-btn")?.addEventListener("click", openShiftHistory);
+  el("reports-btn")?.addEventListener("click", () => openReports("day"));
+}
+
+async function openReports(period) {
+  period = period || "day";
+  el("sale-edit-content").innerHTML = `<h2>Отчёты</h2><div class="empty-state">Загрузка…</div>`;
+  openSheet("sale-edit");
+  let r;
+  try { r = await apiFetch(`/api/admin/reports?period=${period}`, { tg }); }
+  catch { el("sale-edit-content").innerHTML = `<h2>Отчёты</h2><div class="empty-state">Не удалось загрузить</div>`; return; }
+  const tabs = `<div class="seg" style="margin-bottom:12px;">
+      <button type="button" class="seg-btn ${period === "day" ? "active" : ""}" data-rp="day">День</button>
+      <button type="button" class="seg-btn ${period === "month" ? "active" : ""}" data-rp="month">Месяц</button>
+    </div>`;
+  const profitCell = r.profit == null
+    ? `<div class="cm-val cm-mut">—</div>`
+    : `<div class="cm-val cm-green">${money(r.profit)}${r.revenue > 0 ? ` <span class="cm-sub">· ${Math.round((r.profit / r.revenue) * 100)}%</span>` : ""}</div>`;
+  const metrics = `<div class="cash-metrics">
+      <div class="cm-card"><div class="cm-lbl">Выручка</div><div class="cm-val">${money(r.revenue)}</div></div>
+      <div class="cm-card"><div class="cm-lbl">Прибыль</div>${profitCell}</div>
+      <div class="cm-card"><div class="cm-lbl">Расходы</div><div class="cm-val cm-red">${money(r.expenses)}</div></div>
+      <div class="cm-card"><div class="cm-lbl">Средний чек</div><div class="cm-val">${money(r.avg_check)}</div></div>
+    </div>`;
+  const payStr = Object.keys(r.by_payment || {}).filter((k) => k !== "none")
+    .map((k) => `<div class="mini-row"><span>${PAY_LABELS[k] || k}</span><b>${money(r.by_payment[k])}</b></div>`).join("") || `<div class="mini-empty">нет</div>`;
+  const topStr = (r.top_products || []).length
+    ? r.top_products.map((p) => `<div class="mini-row"><span>${p.name} · ${p.qty} шт</span><b>${money(p.revenue)}</b></div>`).join("")
+    : `<div class="mini-empty">нет</div>`;
+  const staffStr = (r.by_staff || []).length
+    ? r.by_staff.map((s) => `<div class="mini-row"><span>${s.name} · ${s.count}</span><b>${money(s.revenue)}</b></div>`).join("")
+    : `<div class="mini-empty">нет продаж в точке</div>`;
+  el("sale-edit-content").innerHTML = `
+    <h2>Отчёты</h2>
+    ${tabs}
+    ${metrics}
+    <div class="intake-hint">${r.tx_count} операций · ${r.orders_count} доставок · ${r.sales_count} в точке${r.has_cost ? "" : " · впишите цены закупки для прибыли"}</div>
+    <div class="shift-sec">Топ товаров</div>${topStr}
+    <div class="shift-sec">По оплате</div>${payStr}
+    <div class="shift-sec">Продажи по сотрудникам</div>${staffStr}`;
+  el("sale-edit-content").querySelectorAll("[data-rp]").forEach((b) =>
+    b.addEventListener("click", () => openReports(b.dataset.rp)));
 }
 
 async function openShiftHistory() {

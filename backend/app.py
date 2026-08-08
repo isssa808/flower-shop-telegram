@@ -3510,22 +3510,17 @@ def _variant_cost(conn, product_id, variant_id):
     return cost
 
 
-@app.route("/api/admin/cash/cogs")
-@require_staff
-def api_cash_cogs():
-    """Себестоимость (COGS) проданного за период — для карточки «Прибыль». Считается
-    ТОЛЬКО на сервере (себестоимость наружу не отдаём). has_cost=false → на фронте
-    прибыль показываем «—» (цены закупки ещё не заданы)."""
-    if g.staff.get("role") == "courier":
-        return jsonify({"error": "forbidden"}), 403
-    period = request.args.get("period", "day")
+def _period_prefix(period):
     n = _batumi_now()
-    prefix = (f"{n.tm_year:04d}-{n.tm_mon:02d}" if period == "month"
-              else f"{n.tm_year:04d}-{n.tm_mon:02d}-{n.tm_mday:02d}")
-    conn = get_db()
+    return (f"{n.tm_year:04d}-{n.tm_mon:02d}" if period == "month"
+            else f"{n.tm_year:04d}-{n.tm_mon:02d}-{n.tm_mday:02d}")
+
+
+def _period_cogs(conn, prefix):
+    """(cogs, has_cost) за период. Доставки по order_items.variant_id, продажи —
+    variant по product+label. Себестоимость только на сервере, наружу не отдаём."""
     has_cost = conn.execute("SELECT 1 FROM flower_stock WHERE cost>0 LIMIT 1").fetchone() is not None
     cogs = 0.0
-    # Доставки (по дате заказа Батуми) — по позициям заказа.
     for o in conn.execute(
         "SELECT id FROM orders WHERE status='delivered' AND datetime(created_at,'+4 hours') LIKE ?",
         (prefix + "%",),
@@ -3535,7 +3530,6 @@ def api_cash_cogs():
         ).fetchall():
             if it["product_id"]:
                 cogs += _variant_cost(conn, it["product_id"], it["variant_id"]) * (it["quantity"] or 1)
-    # Продажи в точке — variant_id ищем по product_id+label (в sales хранится label).
     for s in conn.execute(
         "SELECT product_id, variant_label, quantity FROM sales WHERE COALESCE(created_at,'') LIKE ?",
         (prefix + "%",),
@@ -3550,8 +3544,74 @@ def api_cash_cogs():
             ).fetchone()
             vid = vr["id"] if vr else None
         cogs += _variant_cost(conn, s["product_id"], vid) * (s["quantity"] or 1)
+    return cogs, has_cost
+
+
+@app.route("/api/admin/cash/cogs")
+@require_staff
+def api_cash_cogs():
+    """Себестоимость (COGS) проданного за период — для карточки «Прибыль»."""
+    if g.staff.get("role") == "courier":
+        return jsonify({"error": "forbidden"}), 403
+    conn = get_db()
+    cogs, has_cost = _period_cogs(conn, _period_prefix(request.args.get("period", "day")))
     conn.close()
     return jsonify({"cogs": cogs, "has_cost": has_cost})
+
+
+@app.route("/api/admin/reports")
+@require_owner
+def api_admin_reports():
+    """Аналитика за период (владелец): выручка/прибыль/расходы, средний чек,
+    топ-товаров, разбивка по оплате и по сотрудникам (продажи в точке)."""
+    prefix = _period_prefix(request.args.get("period", "day"))
+    conn = get_db()
+    orders = conn.execute(
+        "SELECT id, total, payment_method FROM orders WHERE status='delivered' "
+        "AND datetime(created_at,'+4 hours') LIKE ?", (prefix + "%",),
+    ).fetchall()
+    sales = conn.execute(
+        "SELECT * FROM sales WHERE COALESCE(created_at,'') LIKE ?", (prefix + "%",)
+    ).fetchall()
+    expenses_total = conn.execute(
+        "SELECT COALESCE(SUM(amount),0) t FROM expenses WHERE COALESCE(created_at,'') LIKE ?",
+        (prefix + "%",),
+    ).fetchone()["t"] or 0
+    revenue = sum((o["total"] or 0) for o in orders) + sum((s["amount"] or 0) for s in sales)
+    cogs, has_cost = _period_cogs(conn, prefix)
+    by_pay = {}
+    for o in orders:
+        by_pay[o["payment_method"] or "none"] = by_pay.get(o["payment_method"] or "none", 0) + (o["total"] or 0)
+    for s in sales:
+        by_pay[s["payment_method"] or "none"] = by_pay.get(s["payment_method"] or "none", 0) + (s["amount"] or 0)
+    prod = {}
+    for o in orders:
+        for it in conn.execute(
+            "SELECT product_name, price, quantity FROM order_items WHERE order_id=?", (o["id"],)
+        ).fetchall():
+            e = prod.setdefault(it["product_name"] or "—", {"qty": 0, "rev": 0})
+            e["qty"] += (it["quantity"] or 0); e["rev"] += (it["price"] or 0) * (it["quantity"] or 0)
+    for s in sales:
+        e = prod.setdefault(s["title"] or "—", {"qty": 0, "rev": 0})
+        e["qty"] += (s["quantity"] or 0); e["rev"] += (s["amount"] or 0)
+    top = sorted(({"name": k, "qty": v["qty"], "revenue": v["rev"]} for k, v in prod.items()),
+                 key=lambda x: -x["revenue"])[:8]
+    staff = {}
+    for s in sales:
+        e = staff.setdefault(s["sold_by"] or "—", {"count": 0, "rev": 0})
+        e["count"] += 1; e["rev"] += (s["amount"] or 0)
+    by_staff = sorted(({"name": k, "count": v["count"], "revenue": v["rev"]} for k, v in staff.items()),
+                      key=lambda x: -x["revenue"])
+    conn.close()
+    tx = len(orders) + len(sales)
+    return jsonify({
+        "revenue": revenue, "cogs": cogs, "has_cost": has_cost,
+        "profit": (revenue - cogs) if has_cost else None,
+        "expenses": expenses_total, "net": revenue - expenses_total,
+        "orders_count": len(orders), "sales_count": len(sales), "tx_count": tx,
+        "avg_check": round(revenue / tx) if tx else 0,
+        "top_products": top, "by_payment": by_pay, "by_staff": by_staff,
+    })
 
 
 @app.route("/api/admin/sales", methods=["GET", "POST"])

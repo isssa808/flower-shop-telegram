@@ -100,6 +100,7 @@
 .exp-amt { color: var(--danger); }
 .seg-wrap { flex-wrap: wrap; }
 .seg-wrap .seg-btn { flex: 1 1 28%; }
+.cash-links { display: flex; gap: 18px; }
 .cash-link { background: none; border: none; color: var(--petrol); font: inherit; font-size: 13px; font-weight: 700; cursor: pointer; padding: 6px 0; }
 .shift-recon { margin: 12px 0; border: 1px solid var(--border); border-radius: var(--radius-m); overflow: hidden; }
 .shift-recon > div { display: flex; justify-content: space-between; padding: 9px 12px; font-size: 13.5px; border-top: 1px solid var(--border); }
