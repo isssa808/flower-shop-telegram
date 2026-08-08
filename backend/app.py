@@ -3396,6 +3396,77 @@ def api_expense_delete(exp_id):
     return jsonify({"ok": True})
 
 
+def _shift_window_orders(conn, shift):
+    """Доставленные заказы во временном окне смены (Батуми = UTC+4). Заказы к смене
+    напрямую не привязаны — берём по времени создания между открытием и закрытием."""
+    opened = shift["opened_at"] or "1970-01-01 00:00"
+    closed = shift["closed_at"]
+    if closed:
+        return conn.execute(
+            "SELECT id, total, payment_method, created_at FROM orders WHERE status='delivered' "
+            "AND datetime(created_at,'+4 hours') BETWEEN datetime(?) AND datetime(?) ORDER BY created_at",
+            (opened, closed),
+        ).fetchall()
+    return conn.execute(
+        "SELECT id, total, payment_method, created_at FROM orders WHERE status='delivered' "
+        "AND datetime(created_at,'+4 hours') >= datetime(?) ORDER BY created_at",
+        (opened,),
+    ).fetchall()
+
+
+def _shift_summary(conn, shift):
+    """dict смены + агрегаты (продажи/расходы по shift_id, доставки по окну)."""
+    sid = shift["id"]
+    st = conn.execute("SELECT COALESCE(SUM(amount),0) t, COUNT(*) c FROM sales WHERE shift_id=?", (sid,)).fetchone()
+    sc = conn.execute("SELECT COALESCE(SUM(amount),0) t FROM sales WHERE shift_id=? AND payment_method='cash'", (sid,)).fetchone()["t"] or 0
+    ex = conn.execute("SELECT COALESCE(SUM(amount),0) t FROM expenses WHERE shift_id=?", (sid,)).fetchone()["t"] or 0
+    exc = conn.execute("SELECT COALESCE(SUM(amount),0) t FROM expenses WHERE shift_id=? AND payment_method='cash'", (sid,)).fetchone()["t"] or 0
+    orders = _shift_window_orders(conn, shift)
+    orders_total = sum((o["total"] or 0) for o in orders)
+    d = dict(shift)
+    d.update({
+        "sales_total": st["t"] or 0, "sales_count": st["c"] or 0, "sales_cash": sc,
+        "expenses_total": ex, "expenses_cash": exc,
+        "orders_total": orders_total, "orders_count": len(orders),
+        "revenue": (st["t"] or 0) + orders_total,
+    })
+    return d, orders
+
+
+@app.route("/api/admin/cash/shifts")
+@require_staff
+def api_cash_shifts():
+    if g.staff.get("role") == "courier":
+        return jsonify({"error": "forbidden"}), 403
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM cash_shifts ORDER BY id DESC LIMIT 60").fetchall()
+    out = [_shift_summary(conn, r)[0] for r in rows]
+    conn.close()
+    return jsonify(out)
+
+
+@app.route("/api/admin/cash/shifts/<int:shift_id>")
+@require_staff
+def api_cash_shift_detail(shift_id):
+    if g.staff.get("role") == "courier":
+        return jsonify({"error": "forbidden"}), 403
+    conn = get_db()
+    sh = conn.execute("SELECT * FROM cash_shifts WHERE id=?", (shift_id,)).fetchone()
+    if not sh:
+        conn.close()
+        return jsonify({"error": "not found"}), 404
+    summary, orders = _shift_summary(conn, sh)
+    sales = conn.execute("SELECT * FROM sales WHERE shift_id=? ORDER BY created_at", (shift_id,)).fetchall()
+    expenses = conn.execute("SELECT * FROM expenses WHERE shift_id=? ORDER BY created_at", (shift_id,)).fetchall()
+    conn.close()
+    return jsonify({
+        "shift": summary,
+        "orders": [dict(o) for o in orders],
+        "sales": [dict(s) for s in sales],
+        "expenses": [dict(e) for e in expenses],
+    })
+
+
 @app.route("/api/admin/sales", methods=["GET", "POST"])
 @require_staff
 def api_admin_sales():

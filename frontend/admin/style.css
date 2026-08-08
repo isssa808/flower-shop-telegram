@@ -97,6 +97,18 @@
 .exp-amt { color: var(--danger); }
 .seg-wrap { flex-wrap: wrap; }
 .seg-wrap .seg-btn { flex: 1 1 28%; }
+.cash-link { background: none; border: none; color: var(--petrol); font: inherit; font-size: 13px; font-weight: 700; cursor: pointer; padding: 6px 0; }
+.shift-recon { margin: 12px 0; border: 1px solid var(--border); border-radius: var(--radius-m); overflow: hidden; }
+.shift-recon > div { display: flex; justify-content: space-between; padding: 9px 12px; font-size: 13.5px; border-top: 1px solid var(--border); }
+.shift-recon > div:first-child { border-top: none; }
+.shift-recon span { color: var(--ink-muted); }
+.rc-ok b { color: #2E8B57; }
+.rc-bad b { color: var(--danger); }
+.rc-warn b { color: #b8860b; }
+.shift-sec { font-size: 11.5px; font-weight: 800; color: var(--ink-muted); text-transform: uppercase; letter-spacing: 0.03em; margin: 15px 0 6px; }
+.mini-row { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; padding: 6px 2px; border-top: 1px solid var(--border); }
+.mini-row b { font-weight: 700; white-space: nowrap; }
+.mini-empty { font-size: 12.5px; color: var(--ink-muted); padding: 4px 2px; }
 
 /* --- назначение курьера / экран курьера --- */
 .assign-box { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }

@@ -1513,9 +1513,74 @@ function renderCashPanel(panel, cash, period, revenue, expTotal, cashInDrawer) {
       <div class="cm-card"><div class="cm-lbl">Расходы</div><div class="cm-val cm-red">${money(expTotal)}</div></div>
       <div class="cm-card"><div class="cm-lbl">${thirdLabel}</div><div class="cm-val">${thirdVal}</div></div>
     </div>`;
-  panel.innerHTML = bar + metrics;
+  panel.innerHTML = bar + metrics + `<button class="cash-link" id="shift-history-btn">История смен ›</button>`;
   el("shift-open-btn")?.addEventListener("click", () => openShiftForm("open"));
   el("shift-close-btn")?.addEventListener("click", () => openShiftForm("close"));
+  el("shift-history-btn")?.addEventListener("click", openShiftHistory);
+}
+
+async function openShiftHistory() {
+  el("sale-edit-content").innerHTML = `<h2>История смен</h2><div class="empty-state">Загрузка…</div>`;
+  openSheet("sale-edit");
+  let shifts = [];
+  try { shifts = await apiFetch("/api/admin/cash/shifts", { tg }); }
+  catch { el("sale-edit-content").innerHTML = `<h2>История смен</h2><div class="empty-state">Не удалось загрузить</div>`; return; }
+  if (!shifts.length) { el("sale-edit-content").innerHTML = `<h2>История смен</h2><div class="empty-state">Смен пока нет</div>`; return; }
+  const rows = shifts.map((s) => {
+    const day = (s.opened_at || "").slice(0, 10);
+    const t1 = (s.opened_at || "").slice(11, 16);
+    const t2 = s.closed_at ? (s.closed_at || "").slice(11, 16) : "…";
+    let tag;
+    if (s.status === "open") tag = `<span class="ev-badge" style="background:#e4f2ea;color:#2e6b48;">открыта</span>`;
+    else {
+      const d = s.diff || 0;
+      tag = Math.abs(d) < 0.5 ? `<span class="ev-badge">сошлась</span>`
+        : (d > 0 ? `<span class="ev-badge ev-exp">излишек ${money(d)}</span>` : `<span class="ev-badge ev-exp">недостача ${money(-d)}</span>`);
+    }
+    return `<div class="card sale-card" data-shift="${s.id}">
+      <div class="sale-info">
+        <div class="sale-title">${fmtDayRu(day)} · ${t1}–${t2} ${tag}</div>
+        <div class="sale-items">выручка ${money(s.revenue)} · расходы ${money(s.expenses_total)}</div>
+      </div>
+      <div class="order-total">${money((s.revenue || 0) - (s.expenses_total || 0))}</div>
+    </div>`;
+  }).join("");
+  el("sale-edit-content").innerHTML = `<h2>История смен</h2>${rows}`;
+  el("sale-edit-content").querySelectorAll("[data-shift]").forEach((c) =>
+    c.addEventListener("click", () => openShiftDetail(Number(c.dataset.shift))));
+}
+
+async function openShiftDetail(id) {
+  el("sale-edit-content").innerHTML = `<div class="empty-state">Загрузка…</div>`;
+  let d;
+  try { d = await apiFetch(`/api/admin/cash/shifts/${id}`, { tg }); }
+  catch { el("sale-edit-content").innerHTML = `<div class="empty-state">Не удалось загрузить</div>`; return; }
+  const s = d.shift;
+  const day = (s.opened_at || "").slice(0, 10);
+  const recon = s.status === "closed" ? `
+    <div class="shift-recon">
+      <div><span>Старт налом</span><b>${money(s.start_cash || 0)}</b></div>
+      <div><span>Ожидалось налом</span><b>${money(s.expected_cash || 0)}</b></div>
+      <div><span>Посчитано по факту</span><b>${money(s.counted_cash || 0)}</b></div>
+      <div class="${(s.diff || 0) < -0.5 ? "rc-bad" : ((s.diff || 0) > 0.5 ? "rc-warn" : "rc-ok")}"><span>Расхождение</span><b>${(s.diff || 0) >= 0 ? "+" : ""}${money(s.diff || 0)}</b></div>
+    </div>` : `<div class="intake-hint">Смена ещё открыта. Старт налом: ${money(s.start_cash || 0)}.</div>`;
+  const orders = (d.orders || []).map((o) => `<div class="mini-row"><span>Доставка №${o.id} ${PAY_LABELS[o.payment_method] || ""}</span><b>${money(o.total)}</b></div>`).join("") || `<div class="mini-empty">нет</div>`;
+  const sales = (d.sales || []).map((x) => `<div class="mini-row"><span>${x.title || "продажа"}${x.variant_label ? ` (${x.variant_label})` : ""} · ${PAY_LABELS[x.payment_method] || "—"}</span><b>${money(x.amount)}</b></div>`).join("") || `<div class="mini-empty">нет</div>`;
+  const exps = (d.expenses || []).map((x) => `<div class="mini-row"><span>${EXP_LABELS[x.category] || "расход"}${x.comment ? ` · ${x.comment}` : ""} · ${PAY_LABELS[x.payment_method] || "—"}</span><b class="exp-amt">−${money(x.amount)}</b></div>`).join("") || `<div class="mini-empty">нет</div>`;
+  el("sale-edit-content").innerHTML = `
+    <button class="cash-link" id="shift-back">‹ Все смены</button>
+    <h2 style="margin-top:4px;">Смена ${fmtDayRu(day)}</h2>
+    <div class="intake-hint">${(s.opened_at || "").slice(11, 16)}–${s.closed_at ? (s.closed_at || "").slice(11, 16) : "…"} · открыл ${s.opened_by || "—"}${s.closed_by ? ` · закрыл ${s.closed_by}` : ""}</div>
+    <div class="cash-metrics">
+      <div class="cm-card"><div class="cm-lbl">Выручка</div><div class="cm-val">${money(s.revenue)}</div></div>
+      <div class="cm-card"><div class="cm-lbl">Расходы</div><div class="cm-val cm-red">${money(s.expenses_total)}</div></div>
+      <div class="cm-card"><div class="cm-lbl">Итого</div><div class="cm-val">${money((s.revenue || 0) - (s.expenses_total || 0))}</div></div>
+    </div>
+    ${recon}
+    <div class="shift-sec">Доставки (${s.orders_count})</div>${orders}
+    <div class="shift-sec">Продажи в точке (${s.sales_count})</div>${sales}
+    <div class="shift-sec">Расходы</div>${exps}`;
+  el("shift-back").addEventListener("click", openShiftHistory);
 }
 
 async function deleteSale(id) {
