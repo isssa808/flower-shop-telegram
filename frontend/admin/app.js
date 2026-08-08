@@ -1383,6 +1383,7 @@ function renderSalesTabs() {
 }
 
 const PAY_LABELS = { cash: "нал", card: "карта", card_store: "карта в магазине", card_courier: "карта курьеру", transfer: "перевод", paypal: "PayPal" };
+const EXP_LABELS = { flowers: "закупка", courier: "курьер", salary: "зарплата", rent: "аренда", other: "прочее" };
 const RU_MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля",
   "августа", "сентября", "октября", "ноября", "декабря"];
 function fmtDayRu(day) {
@@ -1396,17 +1397,21 @@ async function renderSales() {
   renderSalesTabs();
   const listWrap = el("sales-list");
   const totalWrap = el("sales-total");
-  let orders = [], sales = [];
+  const panel = el("cash-panel");
+  let orders = [], sales = [], expenses = [], cash = { shift: null };
   try {
-    [orders, sales] = await Promise.all([
+    [orders, sales, expenses, cash] = await Promise.all([
       apiFetch(`/api/admin/orders?status=delivered&location_id=${LOCATION_ID}`, { tg }),
       apiFetch(`/api/admin/sales?period=${state.salesPeriod}`, { tg }),
+      apiFetch(`/api/admin/expenses?period=${state.salesPeriod}`, { tg }),
+      apiFetch(`/api/admin/cash/current?location_id=${LOCATION_ID}`, { tg }).catch(() => ({ shift: null })),
     ]);
   } catch {
     listWrap.innerHTML = `<div class="empty-state">Не удалось загрузить кассу</div>`;
-    totalWrap.innerHTML = "";
+    totalWrap.innerHTML = ""; if (panel) panel.innerHTML = "";
     return;
   }
+  state.cash = cash;
   const parts = batumiParts();
   const period = state.salesPeriod;
   const keyLen = period === "month" ? 7 : 10;
@@ -1428,26 +1433,40 @@ async function renderSales() {
     title: `${s.title}${s.variant_label ? ` (${s.variant_label})` : ""} ×${s.quantity}`,
     thumb: "", amount: s.amount || 0, pay: s.payment_method, count: s.quantity,
   }));
+  expenses.forEach((x) => events.push({
+    kind: "expense", id: x.id, day: String(x.created_at || "").slice(0, 10), when: String(x.created_at || "").slice(11, 16),
+    title: `${EXP_LABELS[x.category] || "расход"}${x.comment ? ` · ${x.comment}` : ""}`,
+    thumb: "", amount: x.amount || 0, pay: x.payment_method, count: 0,
+  }));
   events.sort((a, b) => (b.day + (b.when || "")).localeCompare(a.day + (a.when || "")));
 
+  // Метрики дня/месяца.
+  const revenue = events.filter((e) => e.kind !== "expense").reduce((s, e) => s + e.amount, 0);
+  const expTotal = expenses.reduce((s, x) => s + (x.amount || 0), 0);
+  const cashInDrawer = (cash && cash.shift) ? cash.expected_cash : null;
+  renderCashPanel(panel, cash, period, revenue, expTotal, cashInDrawer);
+
   if (!events.length) {
-    listWrap.innerHTML = `<div class="empty-state">За ${period === "month" ? "месяц" : "день"} продаж нет</div>`;
+    listWrap.innerHTML = `<div class="empty-state">За ${period === "month" ? "месяц" : "день"} операций нет</div>`;
   } else {
     let html = "", lastDay = null;
     events.forEach((e) => {
       if (period === "month" && e.day !== lastDay) { lastDay = e.day; html += `<div class="sales-day-head">${fmtDayRu(e.day)}</div>`; }
       const payTag = e.pay ? `<span class="pay-tag">${PAY_LABELS[e.pay] || e.pay}</span>`
         : (e.kind === "order" ? `<span class="pay-tag pay-none">оплата?</span>` : "");
-      const badge = e.kind === "sale" ? `<span class="ev-badge">точка</span>` : `<span class="ev-badge ev-order">доставка №${e.id}</span>`;
-      const del = e.kind === "sale" ? `<button class="sale-del" data-del-sale="${e.id}" aria-label="Удалить">✕</button>` : "";
+      let badge, del = "";
+      if (e.kind === "sale") { badge = `<span class="ev-badge">точка</span>`; del = `<button class="sale-del" data-del-sale="${e.id}" aria-label="Удалить">✕</button>`; }
+      else if (e.kind === "expense") { badge = `<span class="ev-badge ev-exp">расход</span>`; del = `<button class="sale-del" data-del-exp="${e.id}" aria-label="Удалить">✕</button>`; }
+      else { badge = `<span class="ev-badge ev-order">доставка №${e.id}</span>`; }
+      const amtStr = e.kind === "expense" ? `−${money(e.amount)}` : money(e.amount);
       html += `
-    <div class="card sale-card" ${e.kind === "order" ? `data-open-order="${e.id}"` : ""}>
+    <div class="card sale-card${e.kind === "expense" ? " exp-card" : ""}" ${e.kind === "order" ? `data-open-order="${e.id}"` : ""}>
       ${e.thumb ? `<img class="order-thumb" src="${e.thumb}" alt=""/>` : `<div class="order-thumb"></div>`}
       <div class="sale-info">
         <div class="sale-title">${badge}${e.when ? ` · ${e.when}` : ""} ${payTag}</div>
         <div class="sale-items">${e.title || "—"}</div>
       </div>
-      <div class="order-total">${money(e.amount)}${del}</div>
+      <div class="order-total${e.kind === "expense" ? " exp-amt" : ""}">${amtStr}${del}</div>
     </div>`;
     });
     listWrap.innerHTML = html;
@@ -1458,19 +1477,45 @@ async function renderSales() {
       }));
     listWrap.querySelectorAll("[data-del-sale]").forEach((b) =>
       b.addEventListener("click", (ev) => { ev.stopPropagation(); deleteSale(Number(b.dataset.delSale)); }));
+    listWrap.querySelectorAll("[data-del-exp]").forEach((b) =>
+      b.addEventListener("click", (ev) => { ev.stopPropagation(); deleteExpense(Number(b.dataset.delExp)); }));
   }
 
-  const kassa = events.reduce((s, e) => s + e.amount, 0);
-  const items = events.reduce((s, e) => s + e.count, 0);
+  const saleEvents = events.filter((e) => e.kind !== "expense");
+  const items = saleEvents.reduce((s, e) => s + e.count, 0);
   const paySplit = {};
-  events.forEach((e) => { const k = e.pay || "none"; paySplit[k] = (paySplit[k] || 0) + e.amount; });
+  saleEvents.forEach((e) => { const k = e.pay || "none"; paySplit[k] = (paySplit[k] || 0) + e.amount; });
   const splitStr = Object.keys(paySplit).filter((k) => k !== "none")
     .map((k) => `${PAY_LABELS[k] || k} ${money(paySplit[k])}`).join(" · ");
   totalWrap.innerHTML = `
     <div class="sales-total-inner">
-      <div><span class="st-count">${events.length}</span> продаж · ${items} шт${splitStr || paySplit.none ? `<div class="pay-split">${splitStr}${paySplit.none ? `${splitStr ? " · " : ""}без метки ${money(paySplit.none)}` : ""}</div>` : ""}</div>
-      <div class="st-sum">${money(kassa)}</div>
+      <div><span class="st-count">${saleEvents.length}</span> продаж · ${items} шт${splitStr ? `<div class="pay-split">${splitStr}</div>` : ""}${expTotal ? `<div class="pay-split">расходы ${money(expTotal)} · итого ${money(revenue - expTotal)}</div>` : ""}</div>
+      <div class="st-sum">${money(revenue)}</div>
     </div>`;
+}
+
+// Плашка смены + карточки-метрики над журналом кассы.
+function renderCashPanel(panel, cash, period, revenue, expTotal, cashInDrawer) {
+  if (!panel) return;
+  const sh = cash && cash.shift;
+  const bar = sh
+    ? `<div class="shift-bar shift-open">
+         <div><div class="shift-title"><span class="shift-dot"></span> Смена открыта · ${(sh.opened_at || "").slice(11, 16)}</div>
+         <div class="shift-sub">старт налом: ${money(sh.start_cash || 0)}${sh.opened_by ? ` · ${sh.opened_by}` : ""}</div></div>
+         <button class="shift-btn" id="shift-close-btn">Закрыть</button></div>`
+    : `<div class="shift-bar">
+         <div><div class="shift-title">Смена закрыта</div><div class="shift-sub">откройте, чтобы вести кассу за день</div></div>
+         <button class="shift-btn" id="shift-open-btn">Открыть</button></div>`;
+  const thirdLabel = period === "month" ? "Итого" : "Нал в кассе";
+  const thirdVal = period === "month" ? money(revenue - expTotal) : (cashInDrawer != null ? money(cashInDrawer) : "—");
+  const metrics = `<div class="cash-metrics">
+      <div class="cm-card"><div class="cm-lbl">Выручка</div><div class="cm-val">${money(revenue)}</div></div>
+      <div class="cm-card"><div class="cm-lbl">Расходы</div><div class="cm-val cm-red">${money(expTotal)}</div></div>
+      <div class="cm-card"><div class="cm-lbl">${thirdLabel}</div><div class="cm-val">${thirdVal}</div></div>
+    </div>`;
+  panel.innerHTML = bar + metrics;
+  el("shift-open-btn")?.addEventListener("click", () => openShiftForm("open"));
+  el("shift-close-btn")?.addEventListener("click", () => openShiftForm("close"));
 }
 
 async function deleteSale(id) {
@@ -1612,6 +1657,106 @@ function openSaleForm() {
   openSheet("sale-edit");
 }
 el("add-sale-btn").addEventListener("click", openSaleForm);
+
+// Расход из кассы (реюзаем шит sale-edit).
+function openExpenseForm() {
+  const cats = [["flowers", "Закупка"], ["courier", "Курьер"], ["salary", "Зарплата"], ["rent", "Аренда"], ["other", "Прочее"]];
+  el("sale-edit-content").innerHTML = `
+    <h2>Расход из кассы</h2>
+    <form id="expense-form">
+      <div class="field"><label>Сумма ₾</label><input id="exp-amount" type="number" min="0" step="1" placeholder="0"/></div>
+      <div class="field"><label>Категория</label>
+        <div class="seg seg-wrap" id="exp-cat">${cats.map(([v, l], i) => `<button type="button" class="seg-btn${i === 0 ? " active" : ""}" data-cat="${v}">${l}</button>`).join("")}</div>
+      </div>
+      <div class="field"><label>Комментарий</label><input id="exp-comment" placeholder="напр. розы у поставщика"/></div>
+      <div class="field"><label>Оплата</label>
+        <div class="seg" id="exp-pay">
+          <button type="button" class="seg-btn active" data-pay="cash">Нал</button>
+          <button type="button" class="seg-btn" data-pay="card">Карта</button>
+          <button type="button" class="seg-btn" data-pay="transfer">Перевод</button>
+        </div>
+      </div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-secondary" data-close="sale-edit">Отмена</button>
+        <button type="submit" class="btn btn-primary">Записать расход</button>
+      </div>
+    </form>`;
+  document.querySelectorAll("#sale-edit-content [data-close]").forEach((b) => b.addEventListener("click", () => closeSheet("sale-edit")));
+  let cat = "flowers", pay = "cash";
+  el("exp-cat").querySelectorAll(".seg-btn").forEach((b) => b.addEventListener("click", () => {
+    el("exp-cat").querySelectorAll(".seg-btn").forEach((x) => x.classList.remove("active")); b.classList.add("active"); cat = b.dataset.cat;
+  }));
+  el("exp-pay").querySelectorAll(".seg-btn").forEach((b) => b.addEventListener("click", () => {
+    el("exp-pay").querySelectorAll(".seg-btn").forEach((x) => x.classList.remove("active")); b.classList.add("active"); pay = b.dataset.pay;
+  }));
+  el("expense-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const amount = parseFloat(el("exp-amount").value);
+    if (!(amount > 0)) { showToast("Укажите сумму"); return; }
+    try {
+      await apiFetch("/api/admin/expenses", {
+        method: "POST",
+        body: { amount, category: cat, comment: (el("exp-comment").value || "").trim(), payment_method: pay, location_id: LOCATION_ID },
+        tg,
+      });
+      showToast("Расход записан");
+      closeSheet("sale-edit");
+      renderSales();
+    } catch (err) { showToast(err?.data?.detail || "Не удалось записать расход"); }
+  });
+  openSheet("sale-edit");
+}
+el("add-expense-btn").addEventListener("click", openExpenseForm);
+
+// Открытие/закрытие смены (реюзаем шит sale-edit).
+function openShiftForm(mode) {
+  const c = state.cash || {};
+  const expected = c.expected_cash;
+  el("sale-edit-content").innerHTML = mode === "open"
+    ? `<h2>Открыть смену</h2>
+       <div class="field"><label>Наличные в кассе на старте, ₾</label><input id="shift-cash" type="number" min="0" step="1" value="0"/></div>
+       <div class="form-actions">
+         <button type="button" class="btn btn-secondary" data-close="sale-edit">Отмена</button>
+         <button type="button" class="btn btn-primary" id="shift-submit">Открыть смену</button>
+       </div>`
+    : `<h2>Закрыть смену</h2>
+       <div class="intake-hint">Ожидается налом (старт + продажи налом − расходы налом): <b>${expected != null ? money(expected) : "—"}</b></div>
+       <div class="field"><label>Сколько налом по факту, ₾</label><input id="shift-cash" type="number" min="0" step="1" value="${expected != null ? Math.round(expected) : 0}"/></div>
+       <div class="form-actions">
+         <button type="button" class="btn btn-secondary" data-close="sale-edit">Отмена</button>
+         <button type="button" class="btn btn-primary" id="shift-submit">Закрыть смену</button>
+       </div>`;
+  document.querySelectorAll("#sale-edit-content [data-close]").forEach((b) => b.addEventListener("click", () => closeSheet("sale-edit")));
+  el("shift-submit").addEventListener("click", async () => {
+    const val = parseFloat(el("shift-cash").value) || 0;
+    try {
+      if (mode === "open") {
+        await apiFetch("/api/admin/cash/open", { method: "POST", body: { start_cash: val, location_id: LOCATION_ID }, tg });
+        showToast("Смена открыта");
+      } else {
+        const r = await apiFetch("/api/admin/cash/close", { method: "POST", body: { counted_cash: val, location_id: LOCATION_ID }, tg });
+        const d = r.diff || 0;
+        showToast(Math.abs(d) < 0.5 ? "Смена закрыта, касса сошлась ✓"
+          : (d > 0 ? `Смена закрыта · излишек ${money(d)}` : `Смена закрыта · недостача ${money(-d)}`));
+      }
+      closeSheet("sale-edit");
+      renderSales();
+    } catch (err) { showToast(err?.data?.detail || "Не удалось"); }
+  });
+  openSheet("sale-edit");
+}
+
+async function deleteExpense(id) {
+  const doDel = async () => {
+    try {
+      await apiFetch(`/api/admin/expenses/${id}`, { method: "DELETE", tg });
+      showToast("Расход удалён");
+      renderSales();
+    } catch { showToast("Не удалось удалить"); }
+  };
+  if (tg.showConfirm) tg.showConfirm("Удалить расход?", (ok) => { if (ok) doDel(); });
+  else doDel();
+}
 
 // ---------------------------------------------------------------------
 async function init() {

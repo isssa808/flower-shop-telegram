@@ -75,6 +75,29 @@
 .chk { display: flex; align-items: center; gap: 8px; font-size: 13.5px; margin: 12px 0 6px; cursor: pointer; }
 .chk input { width: 17px; height: 17px; }
 
+/* --- Касса: смена, метрики, расходы --- */
+.cash-head-btns { display: flex; gap: 8px; }
+.shift-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-m); padding: 11px 13px; margin: 4px 0 10px; }
+.shift-bar.shift-open { background: rgba(46, 139, 87, 0.10); border-color: rgba(46, 139, 87, 0.28); }
+.shift-title { font-size: 13.5px; font-weight: 700; color: var(--ink); display: flex; align-items: center; gap: 6px; }
+.shift-open .shift-title { color: #2E8B57; }
+.shift-sub { font-size: 12px; color: var(--ink-muted); margin-top: 2px; }
+.shift-open .shift-sub { color: #2E8B57; opacity: 0.85; }
+.shift-dot { width: 8px; height: 8px; border-radius: 50%; background: #2E8B57; display: inline-block; }
+.shift-btn { flex: none; font: inherit; font-size: 12.5px; font-weight: 700; padding: 8px 13px; border-radius: 10px;
+  border: 1.5px solid var(--border); background: var(--surface-2); color: var(--ink); cursor: pointer; }
+.shift-open .shift-btn { border-color: #2E8B57; color: #2E8B57; }
+.cash-metrics { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+.cm-card { background: var(--surface); border-radius: var(--radius-s); padding: 9px 10px; }
+.cm-lbl { font-size: 11.5px; color: var(--ink-muted); }
+.cm-val { font-size: 15.5px; font-weight: 800; margin-top: 2px; letter-spacing: -0.02em; }
+.cm-val.cm-red { color: var(--danger); }
+.ev-badge.ev-exp { background: #f8e7e5; color: #a5342f; }
+.exp-amt { color: var(--danger); }
+.seg-wrap { flex-wrap: wrap; }
+.seg-wrap .seg-btn { flex: 1 1 28%; }
+
 /* --- назначение курьера / экран курьера --- */
 .assign-box { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
 .assign-box > label { display: block; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-muted); margin-bottom: 8px; }

@@ -47,9 +47,13 @@
       <section id="view-sales" class="admin-view" style="display:none;">
         <div class="admin-section-head">
           <h2>Касса</h2>
-          <button class="btn btn-primary btn-sm" id="add-sale-btn">+ Продажа</button>
+          <div class="cash-head-btns">
+            <button class="btn btn-secondary btn-sm" id="add-expense-btn">− Расход</button>
+            <button class="btn btn-primary btn-sm" id="add-sale-btn">+ Продажа</button>
+          </div>
         </div>
         <div class="tabs" id="sales-period-tabs"></div>
+        <div id="cash-panel"></div>
         <div id="sales-list"></div>
         <div id="sales-total" class="sales-total-bar"></div>
       </section>
