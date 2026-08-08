@@ -40,6 +40,7 @@ function openSheet(name) {
   el(`${name}-sheet`).classList.add("open");
   if (!sheetStack.includes(name)) sheetStack.push(name);
   tg.BackButton?.show?.();
+  document.body.classList.add("sheet-open");  // лочим прокрутку фона (иначе листается «сквозь» окно)
 }
 function closeSheet(name) {
   el(`${name}-backdrop`).classList.remove("open");
@@ -47,6 +48,7 @@ function closeSheet(name) {
   const i = sheetStack.lastIndexOf(name);
   if (i >= 0) sheetStack.splice(i, 1);
   if (!sheetStack.length) tg.BackButton?.hide?.();
+  document.body.classList.toggle("sheet-open", sheetStack.length > 0);
 }
 document.querySelectorAll("[data-close]").forEach((b) =>
   b.addEventListener("click", () => closeSheet(b.dataset.close))
@@ -1592,8 +1594,23 @@ async function openShiftDetail(id) {
     ${recon}
     <div class="shift-sec">Доставки (${s.orders_count})</div>${orders}
     <div class="shift-sec">Продажи в точке (${s.sales_count})</div>${sales}
-    <div class="shift-sec">Расходы</div>${exps}`;
+    <div class="shift-sec">Расходы</div>${exps}
+    <button class="btn btn-danger btn-block" id="shift-del" style="margin-top:18px;">Удалить смену</button>`;
   el("shift-back").addEventListener("click", openShiftHistory);
+  el("shift-del").addEventListener("click", () => deleteShift(id));
+}
+
+async function deleteShift(id) {
+  const doDel = async () => {
+    try {
+      await apiFetch(`/api/admin/cash/shifts/${id}`, { method: "DELETE", tg });
+      showToast("Смена удалена");
+      openShiftHistory();
+      renderSales();
+    } catch { showToast("Не удалось удалить"); }
+  };
+  if (tg.showConfirm) tg.showConfirm("Удалить смену? Продажи и расходы останутся в журнале по дате.", (ok) => { if (ok) doDel(); });
+  else doDel();
 }
 
 async function deleteSale(id) {

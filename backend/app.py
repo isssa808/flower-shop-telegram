@@ -3452,7 +3452,7 @@ def api_cash_shifts():
     return jsonify(out)
 
 
-@app.route("/api/admin/cash/shifts/<int:shift_id>")
+@app.route("/api/admin/cash/shifts/<int:shift_id>", methods=["GET", "DELETE"])
 @require_staff
 def api_cash_shift_detail(shift_id):
     if g.staff.get("role") == "courier":
@@ -3462,6 +3462,15 @@ def api_cash_shift_detail(shift_id):
     if not sh:
         conn.close()
         return jsonify({"error": "not found"}), 404
+    if request.method == "DELETE":
+        # Удаляем только запись смены (сверку). Продажи/расходы остаются в журнале
+        # по дате — отвязываем их от удаляемой смены (shift_id=NULL).
+        conn.execute("UPDATE sales SET shift_id=NULL WHERE shift_id=?", (shift_id,))
+        conn.execute("UPDATE expenses SET shift_id=NULL WHERE shift_id=?", (shift_id,))
+        conn.execute("DELETE FROM cash_shifts WHERE id=?", (shift_id,))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
     summary, orders = _shift_summary(conn, sh)
     sales = conn.execute("SELECT * FROM sales WHERE shift_id=? ORDER BY created_at", (shift_id,)).fetchall()
     expenses = conn.execute("SELECT * FROM expenses WHERE shift_id=? ORDER BY created_at", (shift_id,)).fetchall()
