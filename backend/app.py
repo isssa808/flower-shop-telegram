@@ -110,6 +110,7 @@ def bootstrap():
     _add_column_if_missing(conn, "notifications", "reply_to", "INTEGER")
     _add_column_if_missing(conn, "notifications", "photo_url", "TEXT")
     _add_column_if_missing(conn, "notifications", "entities", "TEXT")
+    _add_column_if_missing(conn, "sales", "shift_id", "INTEGER")
     # Склад: группа/тип, размер пачки по умолчанию, фото; вариант в позиции заказа.
     _add_column_if_missing(conn, "flower_stock", "flower_type", "TEXT")
     _add_column_if_missing(conn, "flower_stock", "pack_size", "REAL NOT NULL DEFAULT 0")
@@ -3220,6 +3221,175 @@ def _reverse_sale_writeoff(conn, sale):
                          (sale["quantity"], sale["product_id"]))
 
 
+# --------------------------------------------------------------------------
+# Касса: смена (открытие/закрытие + сходимость по наличным) и расходы.
+# Доступно персоналу (не курьеру): флорист может вносить расход и закрывать смену.
+# Аналитика прибыли/отчётов — на фронте только владельцу.
+# --------------------------------------------------------------------------
+EXPENSE_CATEGORIES = ("flowers", "courier", "salary", "rent", "other")
+
+
+def _open_shift(conn, location_id=1):
+    """Текущая открытая кассовая смена точки (или None)."""
+    return conn.execute(
+        "SELECT * FROM cash_shifts WHERE status='open' AND COALESCE(location_id,1)=? "
+        "ORDER BY id DESC LIMIT 1",
+        (location_id or 1,),
+    ).fetchone()
+
+
+def _shift_cash(conn, shift_id):
+    """(продажи налом, расходы налом) в рамках смены."""
+    sc = conn.execute(
+        "SELECT COALESCE(SUM(amount),0) s FROM sales WHERE shift_id=? AND payment_method='cash'",
+        (shift_id,),
+    ).fetchone()["s"] or 0
+    ec = conn.execute(
+        "SELECT COALESCE(SUM(amount),0) s FROM expenses WHERE shift_id=? AND payment_method='cash'",
+        (shift_id,),
+    ).fetchone()["s"] or 0
+    return sc, ec
+
+
+@app.route("/api/admin/cash/current")
+@require_staff
+def api_cash_current():
+    if g.staff.get("role") == "courier":
+        return jsonify({"error": "forbidden"}), 403
+    loc = request.args.get("location_id") or 1
+    conn = get_db()
+    sh = _open_shift(conn, loc)
+    data = {"shift": None}
+    if sh:
+        sc, ec = _shift_cash(conn, sh["id"])
+        data = {
+            "shift": dict(sh),
+            "sales_cash": sc,
+            "expenses_cash": ec,
+            "expected_cash": (sh["start_cash"] or 0) + sc - ec,
+        }
+    conn.close()
+    return jsonify(data)
+
+
+@app.route("/api/admin/cash/open", methods=["POST"])
+@require_staff
+def api_cash_open():
+    if g.staff.get("role") == "courier":
+        return jsonify({"error": "forbidden"}), 403
+    body = request.get_json(force=True)
+    loc = body.get("location_id") or 1
+    conn = get_db()
+    if _open_shift(conn, loc):
+        conn.close()
+        return jsonify({"error": "already open", "detail": "Смена уже открыта"}), 400
+    try:
+        start = float(body.get("start_cash") or 0)
+    except (TypeError, ValueError):
+        conn.close()
+        return jsonify({"error": "bad start_cash"}), 400
+    cur = conn.execute(
+        "INSERT INTO cash_shifts (location_id, opened_by, opened_by_id, opened_at, start_cash, status) "
+        "VALUES (?, ?, ?, ?, ?, 'open')",
+        (loc, g.staff.get("name"), g.staff.get("id"), _batumi_stamp(), start),
+    )
+    sid = cur.lastrowid
+    conn.commit()
+    row = conn.execute("SELECT * FROM cash_shifts WHERE id=?", (sid,)).fetchone()
+    conn.close()
+    return jsonify(dict(row)), 201
+
+
+@app.route("/api/admin/cash/close", methods=["POST"])
+@require_staff
+def api_cash_close():
+    if g.staff.get("role") == "courier":
+        return jsonify({"error": "forbidden"}), 403
+    body = request.get_json(force=True)
+    loc = body.get("location_id") or 1
+    conn = get_db()
+    sh = _open_shift(conn, loc)
+    if not sh:
+        conn.close()
+        return jsonify({"error": "no open shift", "detail": "Смена не открыта"}), 400
+    try:
+        counted = float(body.get("counted_cash") or 0)
+    except (TypeError, ValueError):
+        conn.close()
+        return jsonify({"error": "bad counted_cash"}), 400
+    sc, ec = _shift_cash(conn, sh["id"])
+    expected = (sh["start_cash"] or 0) + sc - ec
+    diff = counted - expected
+    conn.execute(
+        "UPDATE cash_shifts SET closed_by=?, closed_by_id=?, closed_at=?, counted_cash=?, "
+        "expected_cash=?, diff=?, status='closed' WHERE id=?",
+        (g.staff.get("name"), g.staff.get("id"), _batumi_stamp(), counted, expected, diff, sh["id"]),
+    )
+    conn.commit()
+    row = conn.execute("SELECT * FROM cash_shifts WHERE id=?", (sh["id"],)).fetchone()
+    conn.close()
+    return jsonify(dict(row))
+
+
+@app.route("/api/admin/expenses", methods=["GET", "POST"])
+@require_staff
+def api_expenses():
+    if g.staff.get("role") == "courier":
+        return jsonify({"error": "forbidden"}), 403
+    conn = get_db()
+    if request.method == "POST":
+        body = request.get_json(force=True)
+        try:
+            amount = float(body.get("amount"))
+        except (TypeError, ValueError):
+            conn.close()
+            return jsonify({"error": "bad amount", "detail": "Укажите сумму"}), 400
+        if amount <= 0:
+            conn.close()
+            return jsonify({"error": "bad amount", "detail": "Сумма должна быть больше 0"}), 400
+        cat = body.get("category") or "other"
+        if cat not in EXPENSE_CATEGORIES:
+            cat = "other"
+        pm = body.get("payment_method") or "cash"
+        if pm not in VALID_PAYMENT_METHODS:
+            pm = "cash"
+        loc = body.get("location_id") or 1
+        sh = _open_shift(conn, loc)
+        cur = conn.execute(
+            "INSERT INTO expenses (location_id, amount, category, comment, payment_method, shift_id, "
+            "created_by, created_by_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (loc, amount, cat, (body.get("comment") or "").strip(), pm,
+             sh["id"] if sh else None, g.staff.get("name"), g.staff.get("id"), _batumi_stamp()),
+        )
+        eid = cur.lastrowid
+        conn.commit()
+        row = conn.execute("SELECT * FROM expenses WHERE id=?", (eid,)).fetchone()
+        conn.close()
+        return jsonify(dict(row)), 201
+    period = request.args.get("period", "day")
+    n = _batumi_now()
+    prefix = (f"{n.tm_year:04d}-{n.tm_mon:02d}" if period == "month"
+              else f"{n.tm_year:04d}-{n.tm_mon:02d}-{n.tm_mday:02d}")
+    rows = conn.execute(
+        "SELECT * FROM expenses WHERE COALESCE(created_at,'') LIKE ? ORDER BY created_at DESC",
+        (prefix + "%",),
+    ).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/admin/expenses/<int:exp_id>", methods=["DELETE"])
+@require_staff
+def api_expense_delete(exp_id):
+    if g.staff.get("role") == "courier":
+        return jsonify({"error": "forbidden"}), 403
+    conn = get_db()
+    conn.execute("DELETE FROM expenses WHERE id=?", (exp_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+
 @app.route("/api/admin/sales", methods=["GET", "POST"])
 @require_staff
 def api_admin_sales():
@@ -3255,11 +3425,14 @@ def api_admin_sales():
         if variant_id:
             vr = conn.execute("SELECT label FROM product_variants WHERE id=?", (variant_id,)).fetchone()
             variant_label = vr["label"] if vr else None
+        _loc = body.get("location_id") or 1
+        _sh = _open_shift(conn, _loc)
         cur = conn.execute(
             "INSERT INTO sales (location_id, product_id, title, variant_label, amount, quantity, "
-            "payment_method, sold_by, sold_by_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (body.get("location_id") or 1, product_id, title, variant_label,
-             amount, quantity, pm, g.staff.get("name"), g.staff.get("id"), _batumi_stamp()),
+            "payment_method, sold_by, sold_by_id, shift_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (_loc, product_id, title, variant_label,
+             amount, quantity, pm, g.staff.get("name"), g.staff.get("id"),
+             _sh["id"] if _sh else None, _batumi_stamp()),
         )
         sale_id = cur.lastrowid
         manual = [(l.get("flower_id"), l.get("qty")) for l in (body.get("writeoff") or [])]

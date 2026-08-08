@@ -175,6 +175,39 @@ CREATE TABLE IF NOT EXISTS sales (
     payment_method TEXT,                            -- cash | card | transfer
     sold_by TEXT,
     sold_by_id INTEGER,
+    shift_id INTEGER,                               -- к какой кассовой смене относится
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Кассовая смена: открытие/закрытие + сходимость по наличным. expected_cash =
+-- start_cash + продажи налом смены − расходы налом смены; diff = counted − expected.
+CREATE TABLE IF NOT EXISTS cash_shifts (
+    id INTEGER PRIMARY KEY,
+    location_id INTEGER,
+    opened_by TEXT,
+    opened_by_id INTEGER,
+    opened_at TEXT,
+    start_cash REAL NOT NULL DEFAULT 0,
+    closed_by TEXT,
+    closed_by_id INTEGER,
+    closed_at TEXT,
+    counted_cash REAL,
+    expected_cash REAL,
+    diff REAL,
+    status TEXT NOT NULL DEFAULT 'open'              -- open | closed
+);
+
+-- Расходы из кассы (закупка/курьер/зарплата/аренда/прочее). Уменьшают «на руках».
+CREATE TABLE IF NOT EXISTS expenses (
+    id INTEGER PRIMARY KEY,
+    location_id INTEGER,
+    amount REAL NOT NULL,
+    category TEXT,                                   -- flowers | courier | salary | rent | other
+    comment TEXT,
+    payment_method TEXT,                            -- cash | card | transfer
+    shift_id INTEGER,
+    created_by TEXT,
+    created_by_id INTEGER,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
