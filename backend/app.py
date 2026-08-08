@@ -130,6 +130,7 @@ def bootstrap():
     # «Стоимость по запросу»: у товара нет фиксированной цены — вместо «в корзину»
     # показываем «Уточнить у менеджера». Можно включить любому букету.
     _add_column_if_missing(conn, "products", "price_on_request", "INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing(conn, "products", "discount_percent", "INTEGER NOT NULL DEFAULT 0")  # скидка витрины %
     # Разовый перенос старых product_recipe → recipe_lines (на товар целиком), если пусто.
     if not conn.execute("SELECT 1 FROM recipe_lines LIMIT 1").fetchone():
         for r in conn.execute("SELECT product_id, flower_stock_id, quantity_needed FROM product_recipe").fetchall():
@@ -1598,7 +1599,7 @@ def api_create_order():
     for it in items:
         variant = cur.execute(
             "SELECT pv.id AS variant_id, pv.price, pv.label, p.name, p.id as product_id, "
-            "p.track_stock, p.stock_qty FROM product_variants pv "
+            "p.track_stock, p.stock_qty, p.discount_percent FROM product_variants pv "
             "JOIN products p ON p.id = pv.product_id WHERE pv.id = ?",
             (it["variant_id"],),
         ).fetchone()
@@ -1606,8 +1607,13 @@ def api_create_order():
             conn.close()
             return jsonify({"error": f"variant {it['variant_id']} not found"}), 400
         qty = int(it.get("quantity", 1))
-        items_total += variant["price"] * qty
-        resolved_items.append((variant["product_id"], variant["variant_id"], variant["name"], variant["label"], variant["price"], qty))
+        # Скидка витрины применяется на СЕРВЕРЕ (клиенту не доверяем). 0 → цена как есть.
+        # Округляем «вверх на .5» (int(x+0.5)), как JS Math.round на фронте — чтобы
+        # сумма в корзине совпадала с суммой заказа.
+        disc = variant["discount_percent"] or 0
+        unit_price = int(variant["price"] * (1 - disc / 100.0) + 0.5) if disc else variant["price"]
+        items_total += unit_price * qty
+        resolved_items.append((variant["product_id"], variant["variant_id"], variant["name"], variant["label"], unit_price, qty))
         if variant["track_stock"]:
             pid = variant["product_id"]
             simple_need[pid] = simple_need.get(pid, 0) + qty
@@ -2213,8 +2219,8 @@ def api_admin_products():
         cur = conn.execute(
             "INSERT INTO products (location_id, category_id, name, description, composition, "
             "photo_url, status, occasion_tags, is_addon, badge, track_stock, stock_qty, sort_order, "
-            "price_on_request) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "price_on_request, discount_percent) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 body["location_id"], cat_ids[0], body["name"],
                 body.get("description", ""), body.get("composition", ""),
@@ -2224,6 +2230,7 @@ def api_admin_products():
                 1 if body.get("track_stock") else 0, float(body.get("stock_qty") or 0),
                 next_sort,
                 1 if body.get("price_on_request") else 0,
+                max(0, min(90, int(body.get("discount_percent") or 0))),
             ),
         )
         product_id = cur.lastrowid
@@ -2275,6 +2282,7 @@ def api_admin_product_edit(product_id):
         "track_stock": 1 if body.get("track_stock") else 0,
         "stock_qty": float(body.get("stock_qty") or 0),
         "price_on_request": 1 if body.get("price_on_request") else 0,
+        "discount_percent": max(0, min(90, int(body.get("discount_percent") or 0))),
     }
     if body.get("photo_url"):
         fields["photo_url"] = body["photo_url"]

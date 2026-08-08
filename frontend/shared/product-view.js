@@ -45,20 +45,27 @@ export function buildProductSheetHtml(p, opts = {}) {
     descExpanded = false, selectedVariantId = null, selectedQty = 1,
   } = opts;
   const preview = mode === "preview";
+  // Скидка витрины (%): цена со скидкой, старая — зачёркнута. Сервер считает так же.
+  const disc = (!p.price_on_request && (p.discount_percent || 0) > 0) ? p.discount_percent : 0;
+  const du = (price) => (disc ? Math.round(price * (1 - disc / 100)) : price);
 
   const variantsHtml = (p.variants || [])
     .map(
       (v) => `
       <button class="variant-pill ${v.id === selectedVariantId ? "active" : ""}${v.available === false ? " unavail" : ""}" data-variant="${v.id}"${(preview || v.available === false) ? " disabled" : ""}>
         ${v.label}
-        <span class="v-price">${(!p.price_on_request && v.price > 0) ? money(v.price) : t("on_request")}</span>
+        <span class="v-price">${(!p.price_on_request && v.price > 0)
+          ? (disc ? `${money(du(v.price))} <s class="v-old">${money(v.price)}</s>` : money(v.price))
+          : t("on_request")}</span>
       </button>`
     )
     .join("");
 
   const minP = priceOf(p);
   const onRequest = !!p.price_on_request || !minP;
-  const leadPrice = onRequest ? t("price_request") : `${t("from_price")} ${money(minP)}`;
+  const leadPrice = onRequest ? t("price_request")
+    : (disc ? `${t("from_price")} ${money(du(minP))} <s class="pd-old">${money(minP)}</s>`
+            : `${t("from_price")} ${money(minP)}`);
 
   const desc = p.description || "";
   const isLong = desc.length > 120;

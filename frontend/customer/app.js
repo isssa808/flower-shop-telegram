@@ -194,20 +194,34 @@ function findProduct(id) {
   );
 }
 
+// Скидка витрины (%) — активна, только если задана и товар не «по запросу».
+function discPct(p) { return (p && !p.price_on_request && p.discount_percent > 0) ? p.discount_percent : 0; }
+// Цена за 1 шт со скидкой (округляем до ₾). Сервер считает так же — суммы совпадают.
+function unitPrice(p, variant) {
+  const d = discPct(p);
+  const base = (variant && variant.price) || 0;
+  return d ? Math.round(base * (1 - d / 100)) : base;
+}
+
 function productCardHtml(p) {
   const minPrice = priceOf(p);
+  const disc = discPct(p);
   const contactOnly = p.status === "made_to_order" || !!p.price_on_request;
   const priceLabel = (p.price_on_request || !minPrice)
     ? `<span class="pc-price pc-price-req">${t("price_request")}</span>`
-    : `<span class="pc-price"><small>${t("from_price")}</small> ${money(minPrice)}</span>`;
+    : (disc
+        ? `<span class="pc-price"><small>${t("from_price")}</small> ${money(Math.round(minPrice * (1 - disc / 100)))} <s class="pc-old">${money(minPrice)}</s></span>`
+        : `<span class="pc-price"><small>${t("from_price")}</small> ${money(minPrice)}</span>`);
   const fav = state.favorites.has(p.id) ? " on" : "";
   const blabel = badgeLabel(t, p.badge);
   const unavailable = p.available === false;
   const tag = unavailable
     ? `<span class="pc-tag oos">${t("out_of_stock_short")}</span>`
-    : (blabel
-        ? `<span class="pc-tag ${p.badge}">${blabel}</span>`
-        : (p.status === "made_to_order" ? `<span class="pc-tag made">${t("made_to_order")}</span>` : ""));
+    : (disc
+        ? `<span class="pc-tag sale">−${disc}%</span>`
+        : (blabel
+            ? `<span class="pc-tag ${p.badge}">${blabel}</span>`
+            : (p.status === "made_to_order" ? `<span class="pc-tag made">${t("made_to_order")}</span>` : "")));
   const likes = p.likes > 0
     ? `<div class="pc-likes"><svg viewBox="0 0 24 24" stroke="none"><path d="M12 21C12 21 4 14.5 4 8.8C4 5.9 6.2 4 8.6 4C10.2 4 11.4 4.9 12 6C12.6 4.9 13.8 4 15.4 4C17.8 4 20 5.9 20 8.8C20 14.5 12 21 12 21Z"/></svg>${p.likes}${p.order_count > 0 ? `<span class="pc-orders">· ${t("ordered_times", { n: p.order_count })}</span>` : ""}</div>`
     : (p.order_count > 0 ? `<div class="pc-likes"><span class="pc-orders">${t("ordered_times", { n: p.order_count })}</span></div>` : "");
@@ -298,7 +312,7 @@ function quickAdd(p) {
   else
     state.cart.push({
       productId: p.id, name: p.name, photo: p.photo_url,
-      variantId: variant.id, variantLabel: variant.label, price: variant.price, quantity: 1,
+      variantId: variant.id, variantLabel: variant.label, price: unitPrice(p, variant), quantity: 1,
     });
   haptic();
   updateCartBar();
@@ -447,7 +461,7 @@ function addSelectedToCart() {
   else
     state.cart.push({
       productId: p.id, name: p.name, photo: p.photo_url,
-      variantId: variant.id, variantLabel: variant.label, price: variant.price, quantity: state.selectedQty,
+      variantId: variant.id, variantLabel: variant.label, price: unitPrice(p, variant), quantity: state.selectedQty,
     });
   haptic();
   updateCartBar();
@@ -513,7 +527,7 @@ async function validateCart() {
     .filter((l) => byVariant.has(l.variantId))
     .map((l) => {
       const { p, v } = byVariant.get(l.variantId);
-      return { ...l, name: p.name, photo: p.photo_url, variantLabel: v.label, price: v.price };
+      return { ...l, name: p.name, photo: p.photo_url, variantLabel: v.label, price: unitPrice(p, v) };
     });
   updateCartBar();
 }
@@ -1019,7 +1033,7 @@ async function repeatOrder(order) {
       if (existing) existing.quantity += it.quantity;
       else state.cart.push({
         productId: p.id, name: p.name, photo: p.photo_url,
-        variantId: v.id, variantLabel: v.label, price: v.price, quantity: it.quantity,
+        variantId: v.id, variantLabel: v.label, price: unitPrice(p, v), quantity: it.quantity,
       });
       added += 1;
     } catch (_) {}

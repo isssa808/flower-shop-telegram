@@ -563,6 +563,10 @@ async function openProductEdit(productId) {
           <option value="recommended" ${p?.badge === "recommended" ? "selected" : ""}>Рекомендуем</option>
         </select>
       </div>
+      <div class="field"><label>Скидка витрины, %</label>
+        <input name="discount_percent" type="number" step="1" min="0" max="90" value="${p?.discount_percent || 0}"/>
+        <div class="intake-hint" style="margin:4px 0 0;">0 — без скидки. На витрине покажется зачёркнутая старая цена и «−X%».</div>
+      </div>
       <div class="field"><label>Повод (через запятую)</label><input name="occasion_tags" value="${(p?.occasion_tags || []).join(", ")}"/></div>
       <label class="checkbox-row" style="margin:2px 0 8px;">
         <input type="checkbox" name="is_addon" ${p?.is_addon ? "checked" : ""}/>
@@ -674,6 +678,7 @@ async function openProductEdit(productId) {
       track_stock: fd.get("track_stock") ? 1 : 0,
       stock_qty: parseFloat(fd.get("stock_qty")) || 0,
       price_on_request: fd.get("price_on_request") ? 1 : 0,
+      discount_percent: parseInt(fd.get("discount_percent")) || 0,
       variants: variantRows,
     };
 
