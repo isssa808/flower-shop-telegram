@@ -1467,11 +1467,12 @@ async function renderSales() {
       if (period === "month" && e.day !== lastDay) { lastDay = e.day; html += `<div class="sales-day-head">${fmtDayRu(e.day)}</div>`; }
       const payTag = e.pay ? `<span class="pay-tag">${PAY_LABELS[e.pay] || e.pay}</span>`
         : (e.kind === "order" ? `<span class="pay-tag pay-none">оплата?</span>` : "");
+      const neg = e.amount < 0;
       let badge, del = "";
-      if (e.kind === "sale") { badge = `<span class="ev-badge">точка</span>`; del = `<button class="sale-del" data-del-sale="${e.id}" aria-label="Удалить">✕</button>`; }
+      if (e.kind === "sale") { badge = neg ? `<span class="ev-badge ev-exp">возврат</span>` : `<span class="ev-badge">точка</span>`; del = `<button class="sale-del" data-del-sale="${e.id}" aria-label="Удалить">✕</button>`; }
       else if (e.kind === "expense") { badge = `<span class="ev-badge ev-exp">расход</span>`; del = `<button class="sale-del" data-del-exp="${e.id}" aria-label="Удалить">✕</button>`; }
       else { badge = `<span class="ev-badge ev-order">доставка №${e.id}</span>`; }
-      const amtStr = e.kind === "expense" ? `−${money(e.amount)}` : money(e.amount);
+      const amtStr = (e.kind === "expense" || neg) ? `−${money(Math.abs(e.amount))}` : money(e.amount);
       html += `
     <div class="card sale-card${e.kind === "expense" ? " exp-card" : ""}" ${e.kind === "order" ? `data-open-order="${e.id}"` : ""}>
       ${e.thumb ? `<img class="order-thumb" src="${e.thumb}" alt=""/>` : `<div class="order-thumb"></div>`}
@@ -1479,7 +1480,7 @@ async function renderSales() {
         <div class="sale-title">${badge}${e.when ? ` · ${e.when}` : ""} ${payTag}</div>
         <div class="sale-items">${e.title || "—"}</div>
       </div>
-      <div class="order-total${e.kind === "expense" ? " exp-amt" : ""}">${amtStr}${del}</div>
+      <div class="order-total${(e.kind === "expense" || neg) ? " exp-amt" : ""}">${amtStr}${del}</div>
     </div>`;
     });
     listWrap.innerHTML = html;
@@ -1852,6 +1853,49 @@ function openExpenseForm() {
   openSheet("sale-edit");
 }
 el("add-expense-btn").addEventListener("click", openExpenseForm);
+
+// Возврат (деньги назад): минусовая продажа, склад не трогаем.
+function openReturnForm() {
+  el("sale-edit-content").innerHTML = `
+    <h2>Возврат</h2>
+    <form id="return-form">
+      <div class="field"><label>Сумма возврата ₾</label><input id="ret-amount" type="number" min="0" step="1" placeholder="0"/></div>
+      <div class="field"><label>За что</label><input id="ret-title" placeholder="напр. вернули букет"/></div>
+      <div class="field"><label>Чем вернули</label>
+        <div class="seg" id="ret-pay">
+          <button type="button" class="seg-btn active" data-pay="cash">Нал</button>
+          <button type="button" class="seg-btn" data-pay="card">Карта</button>
+          <button type="button" class="seg-btn" data-pay="transfer">Перевод</button>
+        </div>
+      </div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-secondary" data-close="sale-edit">Отмена</button>
+        <button type="submit" class="btn btn-primary">Записать возврат</button>
+      </div>
+    </form>`;
+  document.querySelectorAll("#sale-edit-content [data-close]").forEach((b) => b.addEventListener("click", () => closeSheet("sale-edit")));
+  let pay = "cash";
+  el("ret-pay").querySelectorAll(".seg-btn").forEach((b) => b.addEventListener("click", () => {
+    el("ret-pay").querySelectorAll(".seg-btn").forEach((x) => x.classList.remove("active")); b.classList.add("active"); pay = b.dataset.pay;
+  }));
+  el("return-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const amount = parseFloat(el("ret-amount").value);
+    if (!(amount > 0)) { showToast("Укажите сумму"); return; }
+    try {
+      await apiFetch("/api/admin/sales", {
+        method: "POST",
+        body: { title: (el("ret-title").value || "").trim() || "Возврат", amount, is_return: true, payment_method: pay, writeoff_enabled: false, location_id: LOCATION_ID },
+        tg,
+      });
+      showToast("Возврат записан");
+      closeSheet("sale-edit");
+      renderSales();
+    } catch (err) { showToast(err?.data?.detail || "Не удалось записать возврат"); }
+  });
+  openSheet("sale-edit");
+}
+el("add-return-btn")?.addEventListener("click", openReturnForm);
 
 // Открытие/закрытие смены (реюзаем шит sale-edit).
 function openShiftForm(mode) {

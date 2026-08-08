@@ -76,7 +76,7 @@
 .chk input { width: 17px; height: 17px; }
 
 /* --- Касса: смена, метрики, расходы --- */
-.cash-head-btns { display: flex; gap: 8px; }
+.cash-head-btns { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
 .shift-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px;
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-m); padding: 11px 13px; margin: 4px 0 10px; }
 .shift-bar.shift-open { background: rgba(46, 139, 87, 0.10); border-color: rgba(46, 139, 87, 0.28); }

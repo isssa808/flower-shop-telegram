@@ -3648,6 +3648,11 @@ def api_admin_sales():
         if amount < 0:
             conn.close()
             return jsonify({"error": "bad amount"}), 400
+        # Возврат: сумма уходит минусом (уменьшает выручку), склад НЕ трогаем
+        # (букет обычно не возвращается в продажу).
+        is_return = bool(body.get("is_return"))
+        if is_return:
+            amount = -abs(amount)
         quantity = int(body.get("quantity") or 1)
         pm = body.get("payment_method") or None
         if pm is not None and pm not in VALID_PAYMENT_METHODS:
@@ -3669,7 +3674,7 @@ def api_admin_sales():
         sale_id = cur.lastrowid
         manual = [(l.get("flower_id"), l.get("qty")) for l in (body.get("writeoff") or [])]
         short = False
-        if body.get("writeoff_enabled", True):
+        if body.get("writeoff_enabled", True) and not is_return:
             short = _apply_sale_writeoff(conn, sale_id, product_id, variant_id, quantity, manual)
         conn.commit()
         row = conn.execute("SELECT * FROM sales WHERE id=?", (sale_id,)).fetchone()
