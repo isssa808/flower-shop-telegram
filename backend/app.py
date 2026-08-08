@@ -3230,11 +3230,17 @@ EXPENSE_CATEGORIES = ("flowers", "courier", "salary", "rent", "other")
 
 
 def _open_shift(conn, location_id=1):
-    """Текущая открытая кассовая смена точки (или None)."""
+    """Текущая открытая кассовая смена точки (или None). location_id приводим к
+    int: из query-параметра он приходит строкой ('1'), а COALESCE(...) сравнение
+    int↔text в SQLite не совпадает → иначе смена «терялась»."""
+    try:
+        loc = int(location_id)
+    except (TypeError, ValueError):
+        loc = 1
     return conn.execute(
         "SELECT * FROM cash_shifts WHERE status='open' AND COALESCE(location_id,1)=? "
         "ORDER BY id DESC LIMIT 1",
-        (location_id or 1,),
+        (loc,),
     ).fetchone()
 
 
